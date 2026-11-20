@@ -18,7 +18,9 @@ add_executable(pocketdesk WIN32
     res/pocketdesk.rc
     src/main.cpp
     src/cursor.cpp
+    src/desktop.cpp
     src/devices.cpp
+    src/service.cpp
     src/discovery.cpp
     src/input.cpp
     src/tray.cpp
@@ -44,7 +46,7 @@ target_link_libraries(pocketdesk PRIVATE
     nlohmann_json::nlohmann_json
     unofficial::nayuki-qr-code-generator::nayuki-qr-code-generator
     OpenSSL::SSL OpenSSL::Crypto
-    d3d11 dxgi d3dcompiler winmm iphlpapi ws2_32 shell32)
+    d3d11 dxgi d3dcompiler winmm iphlpapi ws2_32 shell32 wtsapi32 userenv)
 
 # 网页文件复制到 exe 旁边的 web/ 目录
 add_custom_command(TARGET pocketdesk POST_BUILD

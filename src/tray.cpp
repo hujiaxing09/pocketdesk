@@ -31,6 +31,10 @@ bool Tray::create(HINSTANCE instance, Callbacks callbacks) {
 	if (!mWnd)
 		return false;
 	mTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+	// 由系统服务启动时进程是 SYSTEM，权限比资源管理器高，Windows 默认挡掉资源管理器发来的消息（UIPI），
+	// 托盘图标就点不动、资源管理器重启后也加不回来。放行这两种消息。
+	ChangeWindowMessageFilterEx(mWnd, kTrayMessage, MSGFLT_ALLOW, nullptr);
+	ChangeWindowMessageFilterEx(mWnd, mTaskbarCreated, MSGFLT_ALLOW, nullptr);
 	addIcon();
 	return true;
 }

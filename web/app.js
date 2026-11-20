@@ -171,9 +171,14 @@ async function requestPair(base, code) {
 
 function switchTo(id) {
   if (!ring.pcs[id]?.token) return;
+  if (paused) {
+    paused = false;
+    $('paused').hidden = true;
+  }
   ring.current = id;
   saveRing(ring);
   serverState = null;
+  renderState(); // 新电脑的显示器信息还没来，先把上一台的清掉
   sheet.hidden = true;
   connect();
 }
@@ -197,6 +202,8 @@ let lastActivity = Date.now(); // 最近一次操作（触摸、键盘、菜单�
 let retryTimer = null;
 let serverStats = null;
 let serverState = null;
+let notice = ''; // 电脑发来的提示（例如没有显示器），收到画面状态后清掉
+let pcRemote = false; // 这台电脑的 PocketDesk 在远程桌面会话里运行
 
 function setStatus(text) { statusEl.textContent = text || ''; }
 
@@ -212,6 +219,12 @@ function closePc() {
   const p = pc;
   pc = null;
   try { p.close(); } catch { /* 已关闭 */ }
+}
+
+// 让还在进行中的连接作废（手动断开、切到后台时）；它后面的结果不再生效
+function cancelConnect() {
+  connectGen += 1;
+  clearTimeout(retryTimer);
 }
 
 function scheduleReconnect(ms) {
@@ -239,7 +252,7 @@ function sendSettings() {
 async function startSession(target, stale) {
   const opts = { method: 'POST', headers: { Authorization: `Bearer ${target.token}` } };
   try {
-    return await fetchTimeout(`${baseFor(target)}/api/session`, opts, 6000);
+    return await fetchTimeout(`${baseFor(target)}/api/session`, opts, 4000);
   } catch {
     // 地址可能变了（换了 IP）：试所有已知地址，再问其他电脑
     if (stale()) throw new Error('stale');
@@ -252,7 +265,7 @@ async function startSession(target, stale) {
     }
     if (stale()) throw new Error('stale');
     saveRing(ring);
-    return fetchTimeout(`${baseFor(target)}/api/session`, opts, 6000);
+    return fetchTimeout(`${baseFor(target)}/api/session`, opts, 4000);
   }
 }
 
@@ -262,9 +275,17 @@ async function connect() {
   const gen = ++connectGen;
   const stale = () => gen !== connectGen;
   clearTimeout(retryTimer);
+  // 总的保险：不管卡在哪一步（请求一直没有回应、浏览器内部卡住），20 秒还没连上就从头再来
+  setTimeout(() => {
+    if (stale() || paused || document.hidden || !authEl.hidden) return;
+    if (pc && pc.connectionState === 'connected') return;
+    setStatus('连接超时，正在重试…');
+    connect();
+  }, 20000);
   closePc();
   serverStats = null;
   prevStats = null;
+  pcRemote = false;
   const target = currentPc();
   try {
     if (!target) {
@@ -307,7 +328,18 @@ async function connect() {
         let d;
         try { d = JSON.parse(m.data); } catch { return; }
         if (d.type === 'stats') serverStats = d;
-        else if (d.type === 'state') { serverState = d; renderState(); }
+        else if (d.type === 'state') {
+          serverState = d;
+          renderState();
+          if (notice) { notice = ''; setStatus(''); }
+        } else if (d.type === 'hello') {
+          pcRemote = Boolean(d.remote);
+        } else if (d.type === 'notice' && d.reason === 'no-display') {
+          notice = d.reason;
+          setStatus('这台电脑现在没有可用的显示器，所以没有画面。\n' +
+            '没接显示器的主机：插一个 HDMI 显卡欺骗器（假显示器，只接一根线没有用）；' +
+            '或者用远程桌面连着它时也能看到。\n显示器关着的：打开显示器。');
+        }
       };
     };
     p.onconnectionstatechange = () => {
@@ -479,7 +511,7 @@ window.addEventListener('blur', releaseInput);
 // 锁屏或切到别的 App：马上断开，电脑立刻停止编码；回来时自动重连（约 1 秒）
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    clearTimeout(retryTimer);
+    cancelConnect();
     closePc();
   } else {
     lastActivity = Date.now();
@@ -491,7 +523,7 @@ document.addEventListener('visibilitychange', () => {
 
 function pause(reason) {
   paused = true;
-  clearTimeout(retryTimer);
+  cancelConnect();
   closePc();
   setStatus('');
   sheet.hidden = true;
@@ -583,9 +615,13 @@ $('disconnect').addEventListener('click', () => pause('已断开连接，电脑�
 
 function renderState() {
   const s = serverState;
-  if (!s) return;
   const section = $('output-section');
   const el = $('output');
+  if (!s) {
+    section.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
   section.hidden = s.outputs.length < 2;
   el.innerHTML = '';
   for (const o of s.outputs) {
@@ -714,6 +750,7 @@ $('menu-button').addEventListener('click', () => {
   releaseInput();
   keyboard.close();
   renderMode();
+  pcListExpanded = false;
   renderPcs();
   sheet.hidden = false;
   refreshPeers();
@@ -728,7 +765,8 @@ const fsButton = $('fullscreen');
 const standaloneApp = matchMedia('(display-mode: fullscreen), (display-mode: standalone)').matches ||
   navigator.standalone === true;
 function renderFullscreen() {
-  fsButton.hidden = !document.fullscreenEnabled || standaloneApp;
+  // iPhone 上网页全屏没用（只能添加到主屏幕）；已经从主屏幕图标打开时也不需要
+  fsButton.hidden = !document.fullscreenEnabled || standaloneApp || isIOS;
   fsButton.textContent = document.fullscreenElement ? '退出全屏' : '全屏';
 }
 fsButton.addEventListener('click', async () => {
@@ -740,12 +778,12 @@ fsButton.addEventListener('click', async () => {
 });
 document.addEventListener('fullscreenchange', () => { renderFullscreen(); setTimeout(layoutFab, 100); });
 renderFullscreen();
-if (isAndroid) {
-  $('home-hint').textContent = standaloneApp
-    ? '已经是从桌面图标打开的全屏模式。'
-    : '全屏使用：点上面的“全屏”；或者在 Chrome 菜单里点“添加到主屏幕”（或“安装应用”），以后从桌面图标打开，自动全屏。';
-} else if (!isIOS) {
-  $('home-hint').textContent = '';
+// 添加到主屏幕的提示：已经是从主屏幕图标打开的就不占位置
+if (standaloneApp || (!isIOS && !isAndroid)) {
+  $('home-hint').hidden = true;
+} else if (isAndroid) {
+  $('home-hint').textContent =
+    '全屏使用：点上面的“全屏”；或者在 Chrome 菜单里点“添加到主屏幕”（或“安装应用”），以后从桌面图标打开，自动全屏。';
 }
 
 // ---------------- 返回键 / 返回手势（安卓） ----------------
@@ -774,6 +812,45 @@ window.addEventListener('popstate', () => {
   setStatus(BACK_HINT);
   setTimeout(() => { if (statusEl.textContent === BACK_HINT) setStatus(old); }, 2000);
 });
+
+// ---------------- 远程桌面最小化提示 ----------------
+// 电脑上的 PocketDesk 跑在远程桌面会话里时，只要远程桌面窗口被最小化，Windows 就停止绘制这个会话，
+// 手机上一片黑。这时提示原因，画面恢复后提示自动消失。
+
+const probeCanvas = document.createElement('canvas');
+probeCanvas.width = 16;
+probeCanvas.height = 9;
+const probeCtx = probeCanvas.getContext('2d', { willReadFrequently: true });
+
+function videoLooksBlack() {
+  if (!video.videoWidth) return true; // 一帧都还没有
+  try {
+    probeCtx.drawImage(video, 0, 0, probeCanvas.width, probeCanvas.height);
+    const px = probeCtx.getImageData(0, 0, probeCanvas.width, probeCanvas.height).data;
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i] > 12 || px[i + 1] > 12 || px[i + 2] > 12) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const RDP_HINT = '这台电脑正在被远程桌面使用。远程桌面窗口最小化时，Windows 会暂停这个画面，所以是黑的。\n' +
+  '把远程桌面窗口还原，或者断开远程桌面，就能看到画面。';
+let blackSince = 0;
+setInterval(() => {
+  const live = pc && pc.connectionState === 'connected' && !paused && !document.hidden;
+  const black = live && pcRemote && videoLooksBlack();
+  blackSince = black ? (blackSince || Date.now()) : 0;
+  if (black && Date.now() - blackSince >= 3000 && notice !== 'rdp') {
+    notice = 'rdp';
+    setStatus(RDP_HINT);
+  } else if (!black && notice === 'rdp') {
+    notice = '';
+    setStatus('');
+  }
+}, 1000);
 
 // ---------------- 统计 ----------------
 
@@ -848,11 +925,22 @@ setInterval(updateStats, 1000);
 
 // ---------------- 菜单里的电脑列表 ----------------
 
+// 菜单里的电脑列表最多先显示这么多台：当前这台在最前，其余按最近用过排；点“更多”显示全部
+const PC_LIST_LIMIT = 3;
+let pcListExpanded = false;
+
 function renderPcs() {
   const list = $('pc-list');
   list.innerHTML = '';
-  const mine = authorized().sort((a, b) => label(a).localeCompare(label(b), 'zh'));
+  const mine = authorized().sort((a, b) => (b.id === ring.current) - (a.id === ring.current) ||
+    (b.lastUsed || 0) - (a.lastUsed || 0) || label(a).localeCompare(label(b), 'zh'));
+  const others = [...discovered.values()].filter((d) => !ring.pcs[d.id]?.token);
+  const total = mine.length + others.length;
+  let shown = 0;
+  const room = () => pcListExpanded || shown < PC_LIST_LIMIT;
   for (const p of mine) {
+    if (!room()) break;
+    shown += 1;
     const b = document.createElement('button');
     b.type = 'button';
     b.className = `pc${p.id === ring.current ? ' on' : ''}`;
@@ -895,8 +983,9 @@ function renderPcs() {
     }
     list.appendChild(b);
   }
-  for (const d of discovered.values()) {
-    if (ring.pcs[d.id]?.token) continue;
+  for (const d of others) {
+    if (!room()) break;
+    shown += 1;
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'pc new';
@@ -905,6 +994,14 @@ function renderPcs() {
     b.querySelector('.addr').textContent = `${d.ip}  未授权`;
     b.addEventListener('click', () => openAdd(d));
     list.appendChild(b);
+  }
+  if (total > PC_LIST_LIMIT) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'pc more';
+    more.textContent = pcListExpanded ? '收起' : `更多（还有 ${total - shown} 台）`;
+    more.addEventListener('click', () => { pcListExpanded = !pcListExpanded; renderPcs(); });
+    list.appendChild(more);
   }
 }
 

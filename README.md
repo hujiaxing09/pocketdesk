@@ -4,7 +4,7 @@
 
 这是 [hujiaxing09/pocketdesk](https://github.com/hujiaxing09/pocketdesk) 的重写版。旧版基于 Sunshine + MoonlightWeb，能用但太重。新版的目标是：每台电脑一个小程序，手机直接连接，不需要网关和电脑之间的 PIN 配对。旧版在新版达到同等可用之前继续保留。
 
-> 当前状态：阶段 0、1、2 已于 2026-11-20 用 iPhone 验收通过（阶段 2 在 zero、.53、.233 三台电脑上切换），下一步是阶段 3（安装包）。
+> 当前状态：阶段 0、1、2、3 已于 2026-11-20 用 iPhone 验收通过（阶段 2 在 zero、.53、.233 三台电脑上切换；阶段 3 的 0.4.3 安装包装在这三台上，锁屏、UAC、远程桌面都验证过）。
 
 ## 需求
 
@@ -59,8 +59,7 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
 | 0 打通画面 | 截屏 → 硬件 H.264 → WebRTC → iPhone Safari 显示，先不做输入 | 在 .53 上用 iPhone 看到桌面，测出延迟、帧率、CPU/GPU 占用 |
 | 1 单机可用 | 触控输入（复用旧版手势层）、中文输入、光标、断线重连、高 DPI 和多显示器坐标、码率自适应、扫码授权、托盘程序、日志 | 在一台电脑上能完整替代旧版 |
 | 2 多台电脑 | 局域网发现、主机切换、授权方案 | .53 和 .233 都能从同一个页面操作 |
-| 3 安装包 | 安装、卸载（可删除记录）、防火墙规则、开机启动 | 安装和卸载都在干净的电脑上验证 |
-| 4 可选 | 锁屏和 UAC 弹窗下也能操作（系统服务 + 会话内进程） | 按需决定 |
+| 3 安装包 | 安装、卸载（可删除记录）、防火墙规则、开机启动；锁屏和 UAC 弹窗下也能操作（系统服务 + 会话内进程，原阶段 4 并入） | 安装和卸载都在干净的电脑上验证，锁屏时能看到并解锁 |
 
 ## 阶段 0 结果（2026-11-20）
 
@@ -120,6 +119,21 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
 - **顶部留白**：横屏顶部让出 24 点只对 iPhone，安卓不留。
 - 以上只在电脑浏览器里模拟安卓测过，还没在安卓真机上验证（尤其是键盘和证书安装）。
 
+## 阶段 3 做法（2026-11-20）
+
+参考 Sunshine，装成系统服务，锁屏、UAC 弹窗、开机还没登录时也能连：
+
+- **两个进程**：`pocketdesk.exe --service` 是服务，以 SYSTEM 运行，不截屏也不联网，只负责在当前显示在屏幕上的会话里启动 `pocketdesk.exe --agent`（复制服务自己的 SYSTEM 令牌、改成那个会话号，`CreateProcessAsUser` 到 `winsta0\default`）。选会话的规则：有人在电脑前登录着就用控制台会话；否则有人用远程桌面连着就用远程桌面的会话（没接显示器的主机只有这时才有画面，托盘图标也才出现在远程桌面里）；都没有就用控制台会话（登录界面、锁屏）。程序退出、崩溃或会话切换（注销、切换用户、远程桌面连上或断开）时重新启动它；启动后很快就退出的，等待时间逐次加倍，最长 1 分钟。
+- **切桌面**：锁屏和 UAC 显示在 Winlogon 桌面上，只有 SYSTEM 能进去。截屏线程在重建桌面复制前、注入输入失败时，把线程切到当前接收输入的桌面（`OpenInputDesktop` + `SetThreadDesktop`，即 Sunshine 的 `syncThreadDesktop`）再试。SYSTEM 权限也顺带解决了“操作不了管理员权限窗口”（UIPI）。
+- **以用户身份打开**：程序是 SYSTEM，托盘里“扫码连接”“打开日志文件夹”用 `WTSQueryUserToken` 拿到登录用户的令牌，以用户身份打开浏览器和资源管理器。托盘窗口放行资源管理器发来的托盘消息（`ChangeWindowMessageFilterEx`），否则高权限窗口收不到点击。
+- **退出和恢复**：托盘里点退出时，程序以退出码 3 结束，服务随之停止（下次开机自动启动）；从开始菜单打开 PocketDesk 会重新启动服务（安装时给了已登录用户启动服务的权限）并打开配对页。已经在运行时，从开始菜单打开只会打开配对页。
+- **IP 变化**：开机时网络可能还没连上。程序每 5 秒检查一次本机 IP，变了就以退出码 4 结束，服务立即重启它，证书和二维码随之更新。
+- **安装包**：Inno Setup 7（`installer/pocketdesk.iss`，`installer/build.ps1` 一步构建，输出 `dist/PocketDesk-<版本>-setup.exe`）。向导可以选安装位置，数据在安装位置下的 `data`。安装包只复制文件，其余由 `pocketdesk.exe --install` 做：注册并启动服务（自动启动，服务进程意外退出 5 秒后重启）、添加防火墙规则（按程序放行，所有网络类型）、收紧文件夹权限。升级前先停服务。
+- **权限**：程序以 SYSTEM 运行，普通用户如果能改程序文件夹，换掉 exe 就能拿到 SYSTEM 权限。所以安装时把程序文件夹设为只有 SYSTEM 和管理员能改；`data`（根证书私钥、授权记录）只有 SYSTEM 和管理员能读；`data\logs` 普通用户可以看。
+- **卸载**：`pocketdesk.exe --uninstall` 停止并删除服务、结束还在运行的 PocketDesk、删除防火墙规则；最后问是否删除 `data`（授权记录、证书和日志），选“是”就不留痕迹，选“否”则重装到同一位置后手机不用重新授权。静默卸载时保留。
+- **第一次安装时搬数据**：以前直接运行时放在 `%LOCALAPPDATA%\PocketDesk` 的数据会搬到安装位置的 `data`，这台电脑的编号和手机授权不变。
+- 不装也能用：直接运行 `pocketdesk.exe`（便携方式）和以前一样，只是锁屏时不能用。
+
 ## 已知的坑
 
 - 程序以普通权限运行时，Windows 不允许它操作以管理员身份运行的窗口（例如任务管理器）。
@@ -133,17 +147,22 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
 - Safari 遇到不受信任的证书时可以点“访问此网站”临时放行，之后网页和 WebRTC 都能用，看起来和装了证书一样。但这种例外不保证长期有效，跨电脑切换时也不一定生效，两种方式都支持，不强制安装证书：设置页同时给出“直接打开（点访问此网站）”和“安装证书（更稳定）”，已经能连上时也不自动跳走。
 - iPhone 从主屏幕打开的网页 App 和 Safari 存储不互通。授权令牌同时放在网址的 `?k=` 里，“添加到主屏幕”会保存完整网址，主屏幕图标就自带授权。
 - 截取的画面不含鼠标指针，要自己画（参考 Sunshine：透明部分按 alpha 混合，I 形光标这类反色部分用反色混合）。
-- 普通权限的进程不能向管理员权限的窗口注入输入（UIPI），锁屏和 UAC 界面也一样，放到阶段 4。
+- 普通权限的进程不能向管理员权限的窗口注入输入（UIPI），锁屏和 UAC 界面也一样。装成系统服务后解决（阶段 3）。
+- 系统服务里的 SYSTEM 进程直接 `ShellExecute` 打开网址，浏览器会以 SYSTEM 身份运行，必须换成登录用户的令牌。
+- 没接显示器的主机（例如 .53）没有画面可截，锁屏界面也没有。只接一根 HDMI 线不算，显卡要读到显示器信息（EDID）才会输出，要插 HDMI 显卡欺骗器（假显示器）。远程桌面连着时用的是远程桌面自己的虚拟屏幕，断开后就没了。手机上会提示原因。
+- Windows 只在主显示器上显示锁屏，选了扩展屏时锁屏是黑的。
+- 用远程桌面连着一台电脑、又把远程桌面窗口最小化时，Windows 会停止绘制那个会话，PocketDesk 截到的是黑屏。电脑在连接时告诉手机自己是不是在远程桌面会话里（`hello` 消息），手机发现画面全黑超过 3 秒就提示原因。想最小化也不黑屏，可以在发起远程桌面的那台电脑上设置 `HKCU\Software\Microsoft\Terminal Server Client` 下的 DWORD `RemoteDesktop_SuppressWhenMinimized = 2`。
+- 互斥量由 SYSTEM 创建时，普通用户再创建同名互斥量得到的是“拒绝访问”而不是“已存在”，两种都要当成已在运行。
 
 ## 构建和运行
 
 需要 Visual Studio 2026（含 C++ 桌面开发），它自带 CMake 和 vcpkg。在 PowerShell 里：
 
 ```powershell
-$env:VCPKG_ROOT = "E:\Visual Studio8\Community\VCcpkg"   # 按实际安装位置
+$env:VCPKG_ROOT = "E:\Visual Studio\18\Community\VC\vcpkg"   # 按实际安装位置
 cmake --preset default
 cmake --build --preset release
-.uild\RelWithDebInfo\pocketdesk.exe
+.\build\RelWithDebInfo\pocketdesk.exe
 ```
 
 第一次配置会用 vcpkg 编译依赖，FFmpeg 要 20 分钟左右。程序启动后会打印两类地址：
@@ -155,7 +174,8 @@ cmake --build --preset release
 **数据位置**：证书、手机授权记录和日志都放在程序旁边的 `data` 文件夹（例如程序在 `D:\App\pocketdesk`，数据就在 `D:\App\pocketdesk\data`），系统里不留别的文件。程序文件夹不可写时（例如装在 `C:\Program Files`）才放到 `%LOCALAPPDATA%\PocketDesk`。以前版本放在 `%LOCALAPPDATA%\PocketDesk` 的数据，第一次运行新版时会自动搬过来并删掉旧位置。
 
 - 更新：只覆盖 `pocketdesk.exe` 和 `web` 文件夹，保留 `data`。删掉 `data` 会生成新的根证书，手机要重新信任、重新授权。
-- 卸载：删掉整个程序文件夹即可。唯一留在系统里的是 Windows 防火墙为 `pocketdesk.exe` 建的放行规则，可以在“Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙”里删除（阶段 3 的卸载程序会自动删）。
+- 卸载：用安装包装的，在“设置 → 应用”里卸载 PocketDesk，会删除服务和防火墙规则，并询问是否删除 `data`。直接运行的（便携方式），删掉整个程序文件夹即可，唯一留在系统里的是 Windows 防火墙第一次运行时为 `pocketdesk.exe` 建的放行规则，可以在“Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙”里删除。
+- 安装包：`powershell -File installer\build.ps1`，需要 Inno Setup 7（默认找 `.local\innosetup\ISCC.exe`，或者用环境变量 `ISCC` 指定）。
 
 常用参数：`--list`（列出显示器）、`--name 显示名`、`--data 数据目录`、`--output N`、`--encoder h264_nvenc|h264_amf|h264_qsv`、`--fps 60`、`--bitrate 12000`（kbps）、`--web DIR`（直接用源码里的 web 目录，改网页不用重新编译）。
 

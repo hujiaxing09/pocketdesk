@@ -1,4 +1,5 @@
 #include "input.h"
+#include "desktop.h"
 #include "log.h"
 
 #include <nlohmann/json.hpp>
@@ -39,7 +40,10 @@ void warnRejected(const char *what) {
 void sendInputs(std::vector<INPUT> &inputs) {
 	if (inputs.empty())
 		return;
-	if (SendInput(UINT(inputs.size()), inputs.data(), sizeof(INPUT)) != inputs.size())
+	// 失败时可能是桌面变了（锁屏、UAC），切过去再试一次（参考 Sunshine）
+	if (SendInput(UINT(inputs.size()), inputs.data(), sizeof(INPUT)) != inputs.size() &&
+	    (syncThreadDesktop().empty() ||
+	     SendInput(UINT(inputs.size()), inputs.data(), sizeof(INPUT)) != inputs.size()))
 		warnRejected("SendInput");
 	inputs.clear();
 }
@@ -183,7 +187,9 @@ void InputInjector::injectTouchFrame() {
 	}
 	if (frame.empty())
 		return;
-	if (!InjectSyntheticPointerInput(mTouchDevice, frame.data(), UINT32(frame.size())))
+	if (!InjectSyntheticPointerInput(mTouchDevice, frame.data(), UINT32(frame.size())) &&
+	    (syncThreadDesktop().empty() ||
+	     !InjectSyntheticPointerInput(mTouchDevice, frame.data(), UINT32(frame.size()))))
 		warnRejected("触摸注入");
 	mLastTouchInject = std::chrono::steady_clock::now();
 	for (auto &c : mContacts) {

@@ -1,6 +1,6 @@
 // 离线缓存页面本身（不缓存接口）。优先用网络上的最新版本，连不上这台电脑时用缓存，
 // 这样主屏幕图标对应的电脑关机了，页面照样能打开，再去连其他电脑。
-const CACHE = 'pocketdesk-shell-v2';
+const CACHE = 'pocketdesk-shell-v6';
 const SHELL = ['./', 'index.html', 'app.js', 'pcs.js', 'trackpad.js', 'keyboard.js', 'style.css',
   'icon.ico', 'icon-192.png', 'icon-256.png', 'icon-512.png', 'manifest.json', 'vendor/jsQR.js'];
 

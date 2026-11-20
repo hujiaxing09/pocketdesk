@@ -1,4 +1,5 @@
 #include "capture.h"
+#include "desktop.h"
 #include "log.h"
 
 #include <d3d11_4.h>
@@ -69,7 +70,9 @@ bool DesktopCapture::open(int outputIndex) {
 		}
 	}
 	if (!chosen) {
-		log("找不到显示器 {}", outputIndex);
+		// 一个显示器都没有时由调用方记日志（会反复重试，这里不刷屏）
+		if (!outputs.empty())
+			log("找不到显示器 {}", outputIndex);
 		return false;
 	}
 	mAdapter = chosen->adapter;
@@ -101,6 +104,8 @@ bool DesktopCapture::open(int outputIndex) {
 
 bool DesktopCapture::reopenDuplication() {
 	mDup.Reset();
+	// 桌面切换（锁屏、UAC、回到桌面）后复制会失效，要在新桌面上重新开始；只有 SYSTEM 能切到 Winlogon
+	syncThreadDesktop();
 	HRESULT hr = E_FAIL;
 	ComPtr<IDXGIOutput5> out5;
 	if (SUCCEEDED(mOutput.As(&out5))) {

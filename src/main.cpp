@@ -2,12 +2,14 @@
 #include "capture.h"
 #include "certs.h"
 #include "cursor.h"
+#include "desktop.h"
 #include "devices.h"
 #include "discovery.h"
 #include "encoder.h"
 #include "input.h"
 #include "log.h"
 #include "netinfo.h"
+#include "service.h"
 #include "streamer.h"
 #include "tray.h"
 #include "web_server.h"
@@ -16,6 +18,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <timeapi.h>
+#include <winsock2.h>
 
 #include <algorithm>
 #include <atomic>
@@ -32,10 +35,21 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 std::atomic<bool> gRunning{true};
-constexpr const char *kVersion = "0.3.0";
+constexpr const char *kVersion = "0.4.3";
 std::filesystem::path gDataDir; // 证书、授权记录、日志都放这里，启动时确定
 
+enum class Mode {
+	Normal,    // 普通启动（便携使用，或者从开始菜单打开）
+	Service,   // --service：系统服务，由服务管理器启动
+	Agent,     // --agent：由服务在用户会话里以 SYSTEM 启动的程序
+	Install,   // --install：安装包调用，注册服务和防火墙
+	Uninstall, // --uninstall：卸载程序调用
+};
+
 struct Args {
+	Mode mode = Mode::Normal;
+	HANDLE agentQuit = nullptr;   // 服务通知程序退出的事件
+	HANDLE agentParent = nullptr; // 服务进程，它没了程序也退出
 	int output = -1;
 	std::string encoder;
 	int fps = 60;
@@ -100,6 +114,17 @@ bool parseArgs(Args &a) {
 		try {
 			if (k == "--list")
 				a.listOnly = true;
+			else if (k == "--service")
+				a.mode = Mode::Service;
+			else if (k == "--install")
+				a.mode = Mode::Install;
+			else if (k == "--uninstall")
+				a.mode = Mode::Uninstall;
+			else if (k == "--agent") {
+				a.mode = Mode::Agent;
+				a.agentQuit = reinterpret_cast<HANDLE>(uintptr_t(std::stoull(next())));
+				a.agentParent = reinterpret_cast<HANDLE>(uintptr_t(std::stoull(next())));
+			}
 			else if (k == "--output")
 				a.output = std::stoi(next());
 			else if (k == "--encoder")
@@ -135,10 +160,32 @@ bool parseArgs(Args &a) {
 	return true;
 }
 
-std::filesystem::path exeDir() {
+std::filesystem::path exePath() {
 	wchar_t buf[MAX_PATH];
 	GetModuleFileNameW(nullptr, buf, MAX_PATH);
-	return std::filesystem::path(buf).parent_path();
+	return std::filesystem::path(buf);
+}
+
+std::filesystem::path exeDir() { return exePath().parent_path(); }
+
+// 等本机的某个 TCP 端口能连上（服务刚启动，程序还在准备证书和端口）
+bool waitForPort(int port, int ms) {
+	WSADATA wsa;
+	WSAStartup(MAKEWORD(2, 2), &wsa);
+	bool ok = false;
+	for (int waited = 0; waited <= ms && !ok; waited += 300) {
+		SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		sockaddr_in addr{};
+		addr.sin_family = AF_INET;
+		addr.sin_port = htons(u_short(port));
+		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		ok = connect(s, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0;
+		closesocket(s);
+		if (!ok)
+			Sleep(300);
+	}
+	WSACleanup();
+	return ok;
 }
 
 std::filesystem::path dataDir() { return gDataDir; }
@@ -298,6 +345,7 @@ void captureLoop(const Args &args, Streamer &streamer, InputInjector &input, Set
 	uint64_t cursorShapeVersion = 0;
 	int lostCount = 0;
 	auto lastEncoderReopen = Clock::time_point{};
+	bool noDisplay = false; // 一个显示器都没有（没接显示器的主机、显示器关着）
 
 	bool dirty = false;
 	int64_t framePresentQpc = 0;
@@ -357,12 +405,23 @@ void captureLoop(const Args &args, Streamer &streamer, InputInjector &input, Set
 		}
 		if (!capture.device()) {
 			if (!capture.open(wantOutput)) {
+				if (listOutputs().empty()) {
+					if (!noDisplay)
+						log("没有可用的显示器（没接显示器或显示器关着），等显示器出现");
+					// 新手机连上时（stateDirty）也要告诉它
+					if (!noDisplay || settings.stateDirty.exchange(false))
+						streamer.sendControl(json{{"type", "notice"}, {"reason", "no-display"}}.dump());
+					noDisplay = true;
+				}
 				// 指定的显示器不存在了，退回主显示器
 				std::lock_guard lock(settings.m);
 				settings.output = -1;
 				Sleep(1000);
 				continue;
 			}
+			if (noDisplay)
+				log("显示器出现了");
+			noDisplay = false;
 			input.setTarget(capture.desktopRect);
 			cursor.init(capture.device(), capture.context());
 			cursorShapeVersion = 0;
@@ -554,9 +613,8 @@ void captureLoop(const Args &args, Streamer &streamer, InputInjector &input, Set
 	closeAll();
 }
 
-void openUrl(const std::wstring &url) {
-	ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
+// 由服务启动时进程是 SYSTEM，网址和文件夹要以登录用户的身份打开
+void openUrl(const std::wstring &url) { openAsUser(url); }
 
 } // namespace
 
@@ -566,11 +624,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	Args args;
 	if (!parseArgs(args))
 		return 2;
-	const std::string dataNote = chooseDataDir(args);
-	initLogFile(dataDir() / "logs");
 	const std::wstring pairUrl = L"http://127.0.0.1:" + std::to_wstring(args.httpPort) + L"/pair";
 
-	log("PocketDesk {} 启动，数据目录 {}（{}）", kVersion, dataDir().string(), dataNote);
+	// 已经装成系统服务：用户从开始菜单打开时，不再另起一份，确保服务在运行，然后打开配对页
+	if (args.mode == Mode::Normal && args.dataDir.empty() && !args.listOnly && !isLocalSystem()) {
+		auto st = service::stateFor(exePath());
+		if (st != service::State::NotInstalled) {
+			if (st == service::State::Stopped)
+				service::start();
+			waitForPort(args.httpPort, 15000);
+			openUrl(pairUrl);
+			return 0;
+		}
+	}
+
+	const std::string dataNote = chooseDataDir(args);
+	initLogFile(dataDir() / "logs");
+	if (args.mode == Mode::Service)
+		return service::run(exePath());
+	if (args.mode == Mode::Install)
+		return service::install(exePath(), dataDir());
+	if (args.mode == Mode::Uninstall)
+		return service::uninstall(exePath());
+	const bool agent = args.mode == Mode::Agent;
+
+	log("PocketDesk {} 启动{}，数据目录 {}（{}）", kVersion, agent ? "（系统服务）" : "", dataDir().string(),
+	    dataNote);
 	for (auto &o : listOutputs())
 		log("  显示器 {}{}: {} [{},{} {}x{}] 显卡 {} (0x{:04X})", o.index, o.primary ? "（主）" : "",
 		    o.deviceName, o.rect.left, o.rect.top, o.rect.right - o.rect.left,
@@ -583,7 +662,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	if (!args.dataDir.empty())
 		mutexName += L"." + std::to_wstring(std::hash<std::wstring>{}(args.dataDir.wstring()));
 	HANDLE singleton = CreateMutexW(nullptr, TRUE, mutexName.c_str());
-	if (GetLastError() == ERROR_ALREADY_EXISTS) {
+	// 系统服务启动的那份是 SYSTEM 建的互斥量，普通用户打不开，会得到“拒绝访问”
+	if (GetLastError() == ERROR_ALREADY_EXISTS || GetLastError() == ERROR_ACCESS_DENIED) {
+		if (agent) {
+			log("这个会话里已经有 PocketDesk 在运行，服务启动的这份退出");
+			return 5;
+		}
 		log("PocketDesk 已经在运行，打开配对页");
 		openUrl(pairUrl);
 		return 0;
@@ -627,7 +711,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 		else if (type == "clientStats")
 			onClientStats(settings, id, streamerPtr ? streamerPtr->deviceName(id) : "", j);
 	};
-	so.onControlOpen = [&](const std::string &) { settings.stateDirty = true; };
+	so.onControlOpen = [&](const std::string &id) {
+		settings.stateDirty = true;
+		// 告诉手机这份程序是不是在远程桌面会话里：远程桌面窗口最小化时 Windows 会停止绘制这个会话，
+		// 画面全黑，手机据此提示原因
+		if (streamerPtr)
+			streamerPtr->sendControlTo(
+			    id, json{{"type", "hello"}, {"remote", GetSystemMetrics(SM_REMOTESESSION) != 0}}.dump());
+	};
 	so.onClosed = [&](const std::string &id) {
 		input.releaseAll();
 		std::lock_guard lock(settings.m);
@@ -650,8 +741,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	                uint16_t(args.discoveryPort));
 	wo.discovery = &discovery;
 	if (!web.start(wo, certs, streamer, devices)) {
-		MessageBoxW(nullptr, L"PocketDesk 启动失败：端口被占用或证书无效，详见日志。", L"PocketDesk",
-		            MB_ICONERROR);
+		// 服务启动的不弹窗（服务会过一会儿重试），看日志
+		if (!agent)
+			MessageBoxW(nullptr, L"PocketDesk 启动失败：端口被占用或证书无效，详见日志。", L"PocketDesk",
+			            MB_ICONERROR);
 		return 1;
 	}
 	log("证书目录: {}", (dataDir() / "certs").string());
@@ -661,12 +754,45 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
 	std::thread worker([&] { captureLoop(args, streamer, input, settings); });
 
+	int exitCode = 0;
 	Tray tray;
 	Tray::Callbacks cb;
 	cb.onPair = [&] { openUrl(pairUrl); };
 	cb.onOpenLogs = [] { openUrl(logDir().wstring()); };
-	cb.onExit = [] { log("从托盘菜单退出"); };
+	cb.onExit = [&] {
+		log("从托盘菜单退出");
+		if (agent)
+			exitCode = service::kExitUserQuit; // 告诉服务也停下
+	};
 	tray.create(instance, cb);
+
+	// 由服务启动时：服务要求退出、服务进程没了、或者本机 IP 变了（证书要包含新 IP，重启一次）
+	std::thread agentWatch;
+	if (agent) {
+		agentWatch = std::thread([&] {
+			std::vector<std::string> lastIps = ips;
+			std::sort(lastIps.begin(), lastIps.end());
+			HANDLE waits[2] = {args.agentQuit, args.agentParent};
+			for (int tick = 0; gRunning; ++tick) {
+				DWORD r = WaitForMultipleObjects(2, waits, FALSE, 500);
+				if (r == WAIT_OBJECT_0 || r == WAIT_OBJECT_0 + 1 || r == WAIT_FAILED) {
+					log("{}", r == WAIT_OBJECT_0 ? "服务要求退出" : "服务进程已经不在，退出");
+					tray.quit();
+					return;
+				}
+				if (tick % 10 == 9) {
+					auto now = localLanIPv4();
+					std::sort(now.begin(), now.end());
+					if (now != lastIps) {
+						log("本机 IP 变了，重启以更新证书和二维码");
+						exitCode = service::kExitRestart;
+						tray.quit();
+						return;
+					}
+				}
+			}
+		});
+	}
 	std::wstring tip = L"PocketDesk";
 	if (!ips.empty())
 		tip += L" · " + widen(ips.front());
@@ -674,7 +800,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	if (devices.list().empty()) {
 		tray.notify(L"PocketDesk 已在后台运行", L"用手机相机扫描打开的二维码即可连接。");
 		openUrl(pairUrl);
-	} else {
+	} else if (!agent) {
+		// 系统服务每次开机、登录都会启动，不打扰
 		tray.notify(L"PocketDesk 已在后台运行", L"点托盘图标可以给新手机扫码授权。");
 	}
 
@@ -698,11 +825,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	gRunning = false;
 	worker.join();
 	tipper.join();
+	if (agentWatch.joinable())
+		agentWatch.join();
 	input.releaseAll();
 	web.stop();
 	discovery.stop();
 	timeEndPeriod(1);
 	ReleaseMutex(singleton);
 	CloseHandle(singleton);
-	return 0;
+	log("已退出（退出码 {}）", exitCode);
+	return exitCode;
 }
