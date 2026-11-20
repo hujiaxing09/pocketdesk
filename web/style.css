@@ -30,7 +30,7 @@ html, body {
 button { font: inherit; color: inherit; }
 
 /* iPhone 横屏全屏时，屏幕最上沿约 20 点被 iOS 留给下拉通知中心，触摸不会交给网页；
-   画面整体往下让出这一条（--reserve-top 由 app.js 设置） */
+   画面整体往下让出这一条（--reserve-top 由 app.js 设置，安卓上为 0） */
 #stage {
   position: fixed;
   inset: var(--reserve-top, 0px) 0 0 0;
@@ -298,3 +298,21 @@ button.secondary { background: var(--chip); }
 }
 #paused[hidden] { display: none; }
 #paused .card { max-width: 320px; text-align: center; }
+
+/* 输入法正在组词时（中文拼音、安卓 Gboard 的英文单词），在键盘上方显示还没上屏的内容 */
+#kb-compose {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--kb-bottom, 0px) + 56px);
+  transform: translateX(-50%);
+  max-width: 80vw;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(30, 30, 32, 0.96);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+#kb-compose[hidden] { display: none; }

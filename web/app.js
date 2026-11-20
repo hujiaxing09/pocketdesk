@@ -38,12 +38,26 @@ const ring = loadRing();
 let originInfo = null;            // 提供这个页面的那台电脑（可能已经关机，页面来自离线缓存）
 const discovered = new Map();     // 局域网里看到、但还没授权的电脑
 
-function deviceName() {
+// iPad 的 Safari 默认伪装成 Mac，用触摸点数区分
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isAndroid = /Android/.test(navigator.userAgent);
+
+// 授权时报给电脑的手机名字，显示在电脑的已授权列表里
+async function deviceName() {
   const ua = navigator.userAgent;
   const ios = ua.match(/(iPhone|iPad)[^)]*OS (\d+)_(\d+)/);
   if (ios) return `${ios[1]}（iOS ${ios[2]}.${ios[3]}）`;
-  const android = ua.match(/Android (\d+)[^;]*;\s*([^;)]+)/);
-  if (android) return `${android[2].trim()}（Android ${android[1]}）`;
+  if (isAndroid) {
+    // 新版 Chrome 的 UA 里型号固定写成 “K”、版本固定写成 10，真实值要另外问
+    try {
+      const h = await navigator.userAgentData?.getHighEntropyValues(['model', 'platformVersion']);
+      if (h?.model) return `${h.model}（Android ${(h.platformVersion || '').split('.')[0] || '?'}）`;
+    } catch { /* 不支持就用 UA */ }
+    const m = ua.match(/Android (\d+)[^;]*;\s*([^;)]+)/);
+    if (m && m[2].trim() !== 'K') return `${m[2].trim()}（Android ${m[1]}）`;
+    return '安卓手机';
+  }
   return '浏览器';
 }
 
@@ -147,7 +161,7 @@ async function requestPair(base, code) {
     const res = await fetchTimeout(`${base}/api/pair`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, name: deviceName(), phone: ring.phone }),
+      body: JSON.stringify({ code, name: await deviceName(), phone: ring.phone }),
     }, 5000);
     return res.ok ? (await res.json()).token : '';
   } catch {
@@ -177,7 +191,7 @@ function showAuth(target, why) {
 
 let pc = null;
 let control = null;
-let connecting = false;
+let connectGen = 0;            // 每次发起连接加 1；切换电脑时旧的连接立刻作废
 let paused = false;            // 手动断开或长时间不操作而暂停；点一下才继续
 let lastActivity = Date.now(); // 最近一次操作（触摸、键盘、菜单）
 let retryTimer = null;
@@ -222,25 +236,31 @@ function sendSettings() {
   send({ type: 'settings', bitrate: prefs.bitrate, scale: prefs.scale, fps: prefs.fps, output: outputFor(ring.current) });
 }
 
-async function startSession(target) {
+async function startSession(target, stale) {
   const opts = { method: 'POST', headers: { Authorization: `Bearer ${target.token}` } };
   try {
     return await fetchTimeout(`${baseFor(target)}/api/session`, opts, 6000);
   } catch {
     // 地址可能变了（换了 IP）：试所有已知地址，再问其他电脑
+    if (stale()) throw new Error('stale');
     setStatus(`正在查找 ${label(target)}…`);
     if (!await probe(target)) {
+      if (stale()) throw new Error('stale');
       await refreshPeers();
+      if (stale()) throw new Error('stale');
       if (!await probe(target)) throw new Error(`找不到「${label(target)}」，确认它已开机并运行 PocketDesk`);
     }
+    if (stale()) throw new Error('stale');
     saveRing(ring);
     return fetchTimeout(`${baseFor(target)}/api/session`, opts, 6000);
   }
 }
 
+// 可以随时再调用：新的一次会让还没完成的旧连接作废（比如上一台电脑关了还在查找中，就切到了别的电脑）
 async function connect() {
-  if (connecting || paused || document.hidden) return;
-  connecting = true;
+  if (paused || document.hidden) return;
+  const gen = ++connectGen;
+  const stale = () => gen !== connectGen;
   clearTimeout(retryTimer);
   closePc();
   serverStats = null;
@@ -253,7 +273,8 @@ async function connect() {
     }
     authEl.hidden = true;
     setStatus(`正在连接 ${label(target)}…`);
-    const res = await startSession(target);
+    const res = await startSession(target, stale);
+    if (stale()) return;
     if (res.status === 401) {
       target.token = '';
       saveRing(ring);
@@ -264,6 +285,7 @@ async function connect() {
     target.lastUsed = Date.now();
     saveRing(ring);
     const offer = await res.json();
+    if (stale()) return;
     const base = baseFor(target);
 
     const p = new RTCPeerConnection({ iceServers: [] });
@@ -301,11 +323,13 @@ async function connect() {
     await p.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
     await p.setLocalDescription(await p.createAnswer());
     await waitIceGathering(p, 2000);
+    if (stale()) return;
     const res2 = await fetchTimeout(`${base}/api/answer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: offer.id, sdp: p.localDescription.sdp }),
     }, 5000);
+    if (stale()) return;
     if (!res2.ok) throw new Error(`电脑没有接受应答（${res2.status}）`);
     setStatus(`正在建立视频连接（${label(target)}）…`);
     setTimeout(() => {
@@ -315,10 +339,9 @@ async function connect() {
       }
     }, 10000);
   } catch (err) {
+    if (stale()) return; // 已经换了别的连接，旧的失败不用管
     setStatus(`连接失败：${err.message}。3 秒后重试`);
     scheduleReconnect(3000);
-  } finally {
-    connecting = false;
   }
 }
 
@@ -356,6 +379,7 @@ const canInput = () => Boolean(control) && sheet.hidden && authEl.hidden;
 
 const trackpad = new Trackpad({ send, gain: trackpadGain, onKeyboard: () => keyboard.toggle() });
 const keyboard = new Keyboard({
+  compose: $('kb-compose'),
   input: $('kb-input'),
   bar: $('keybar'),
   send,
@@ -594,8 +618,8 @@ const FAB_PAD = 6;
 let fabFloating = true;
 
 // 横屏时顶部让出 iOS 系统手势占用的一条（竖屏时画面上下本来就有黑边）。
-// 实测 iPhone 横屏全屏：屏幕最上沿约 20 点收不到触摸，留 24 点后画面第一行能点到。
-const RESERVE_TOP = 24;
+// 实测 iPhone 横屏全屏：屏幕最上沿约 20 点收不到触摸，留 24 点后画面第一行能点到。安卓没有这个问题。
+const RESERVE_TOP = isIOS ? 24 : 0;
 function layoutStage() {
   const landscape = window.innerWidth > window.innerHeight;
   document.documentElement.style.setProperty('--reserve-top', landscape ? `${RESERVE_TOP}px` : '0px');
@@ -697,6 +721,59 @@ $('menu-button').addEventListener('click', () => {
 $('sheet-close').addEventListener('click', () => { sheet.hidden = true; });
 sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.hidden = true; });
 $('kb-button').addEventListener('click', () => { if (!fabJustDragged) keyboard.toggle(); });
+
+// ---------------- 全屏（安卓 Chrome 等；iPhone 不支持网页全屏，只能添加到主屏幕） ----------------
+
+const fsButton = $('fullscreen');
+const standaloneApp = matchMedia('(display-mode: fullscreen), (display-mode: standalone)').matches ||
+  navigator.standalone === true;
+function renderFullscreen() {
+  fsButton.hidden = !document.fullscreenEnabled || standaloneApp;
+  fsButton.textContent = document.fullscreenElement ? '退出全屏' : '全屏';
+}
+fsButton.addEventListener('click', async () => {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+  } catch { /* 浏览器拒绝 */ }
+  sheet.hidden = true;
+});
+document.addEventListener('fullscreenchange', () => { renderFullscreen(); setTimeout(layoutFab, 100); });
+renderFullscreen();
+if (isAndroid) {
+  $('home-hint').textContent = standaloneApp
+    ? '已经是从桌面图标打开的全屏模式。'
+    : '全屏使用：点上面的“全屏”；或者在 Chrome 菜单里点“添加到主屏幕”（或“安装应用”），以后从桌面图标打开，自动全屏。';
+} else if (!isIOS) {
+  $('home-hint').textContent = '';
+}
+
+// ---------------- 返回键 / 返回手势（安卓） ----------------
+// 安卓的返回手势是从屏幕左右边缘往里划，操作电脑时很容易误触，直接退出页面会断开连接。
+// 做法：在历史记录里多放一层，返回时先关掉菜单或键盘；什么都没开时提示“再返回一次退出”。
+// Chrome 只承认用户点过屏幕之后放进去的历史记录，所以在触摸结束时补放一层。
+let backTrap = false;
+let backExitUntil = 0;
+const BACK_HINT = '再返回一次退出 PocketDesk';
+function armBackTrap() {
+  if (backTrap || Date.now() < backExitUntil) return;
+  backTrap = true;
+  history.pushState({ pdTrap: true }, '', location.href);
+}
+for (const name of ['pointerup', 'touchend']) document.addEventListener(name, armBackTrap, true);
+window.addEventListener('popstate', () => {
+  if (!backTrap) return;
+  backTrap = false;
+  const rearm = () => setTimeout(armBackTrap, 0);
+  if (!scanEl.hidden) { stopScan(); rearm(); return; }
+  if (!addEl.hidden) { closeAdd(); rearm(); return; }
+  if (!sheet.hidden) { sheet.hidden = true; rearm(); return; }
+  if (keyboard.isOpen) { keyboard.close(); rearm(); return; }
+  backExitUntil = Date.now() + 2000;
+  const old = statusEl.textContent === BACK_HINT ? '' : statusEl.textContent;
+  setStatus(BACK_HINT);
+  setTimeout(() => { if (statusEl.textContent === BACK_HINT) setStatus(old); }, 2000);
+});
 
 // ---------------- 统计 ----------------
 
@@ -885,7 +962,7 @@ async function checkTarget(t) {
   const base = originInfo && addTarget.id === originInfo.id ? location.origin : baseOf(addTarget.ip, addTarget.https);
   const info = await getInfo(base, 3000);
   if (!info) {
-    // 手机编号带到 Safari 里，那边授权时电脑也能认出是同一部手机
+    // 手机编号带到浏览器里，那边授权时电脑也能认出是同一部手机
     $('add-setup').href = `http://${addTarget.ip}:${addTarget.http}/?p=${ring.phone}`;
     addStep('trust');
     return;

@@ -1,5 +1,7 @@
-// 键盘：隐藏的输入框负责唤起 iPhone 键盘（含中文输入法），上面一排是 Windows 特殊键。
+// 键盘：隐藏的输入框负责唤起手机键盘（含中文输入法），上面一排是 Windows 特殊键。
 // 文字（包括输入法上屏的中文）整段发给电脑；退格、回车等转成按键。
+// 输入法组词时（中文拼音；安卓 Gboard 连英文也是按单词组词，按空格或点候选词才上屏）
+// 先不发，在键盘上方显示正在组的内容，上屏后整段发出。
 // Ctrl/Alt/Shift/⊞ 点一下锁定，下一个按键或字母会带上它们（例如 Ctrl 然后 c = Ctrl+C）；
 // 锁定状态下再点一次同一个键，就单独按一下它（例如点两下 ⊞ 打开开始菜单）。
 
@@ -15,9 +17,10 @@ function charToVk(ch) {
 }
 
 export class Keyboard {
-  constructor({ input, bar, send, onChange = () => {} }) {
+  constructor({ input, bar, compose, send, onChange = () => {} }) {
     this.input = input;
     this.bar = bar;
+    this.compose = compose;
     this.send = send;
     this.onChange = onChange;
     this.isOpen = false;
@@ -25,8 +28,10 @@ export class Keyboard {
     this.mods = new Set();
 
     input.addEventListener('compositionstart', () => { this.composing = true; });
+    input.addEventListener('compositionupdate', (e) => this.showCompose(e.data));
     input.addEventListener('compositionend', (e) => {
       this.composing = false;
+      this.showCompose('');
       if (e.data) this.typeText(e.data);
       this.reset();
     });
@@ -57,7 +62,13 @@ export class Keyboard {
     vv?.addEventListener('scroll', place);
   }
 
-  // 必须在点击/触摸结束的事件处理里同步调用，iPhone 才会弹出键盘
+  showCompose(text) {
+    if (!this.compose) return;
+    this.compose.textContent = text || '';
+    this.compose.hidden = !text;
+  }
+
+  // 必须在点击/触摸结束的事件处理里同步调用，手机才会弹出键盘
   open() {
     this.isOpen = true;
     this.bar.hidden = false;
@@ -72,6 +83,7 @@ export class Keyboard {
     this.bar.hidden = true;
     this.mods.clear();
     this.renderMods();
+    this.showCompose('');
     this.input.blur();
     document.documentElement.style.setProperty('--kb-bottom', '0px');
     this.onChange(false);

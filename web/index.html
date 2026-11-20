@@ -10,6 +10,7 @@
 <meta name="theme-color" content="#000000">
 <link rel="icon" href="icon.ico">
 <link rel="apple-touch-icon" href="icon-256.png">
+<link rel="manifest" href="manifest.json">
 <title>PocketDesk</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -86,14 +87,16 @@
     <section class="row">
       <label class="switch"><input id="show-stats" type="checkbox"> 显示统计</label>
     </section>
+    <button id="fullscreen" class="secondary" type="button" hidden>全屏</button>
     <button id="disconnect" class="secondary" type="button">断开连接</button>
-    <p class="hint">全屏使用：在 Safari 里点“共享 → 添加到主屏幕”，以后从主屏幕图标打开。授权会一起带过去，不用再扫码。</p>
+    <p class="hint" id="home-hint">全屏使用：在 Safari 里点“共享 → 添加到主屏幕”，以后从主屏幕图标打开。授权会一起带过去，不用再扫码。</p>
     <button id="sheet-close" class="primary" type="button">完成</button>
   </div>
 </div>
 
-<!-- 键盘：隐藏的输入框负责唤起 iPhone 键盘，上面一排是 Windows 特殊键 -->
+<!-- 键盘：隐藏的输入框负责唤起手机键盘，上面一排是 Windows 特殊键 -->
 <input id="kb-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" aria-label="输入到电脑">
+<div id="kb-compose" hidden></div>
 <div id="keybar" hidden>
   <button type="button" data-vk="27">Esc</button>
   <button type="button" data-vk="9">Tab</button>
@@ -145,8 +148,8 @@
     </div>
     <div id="add-trust" hidden>
       <p>连不上这台电脑。可能是它没有开 PocketDesk，或者这部手机还没有信任它（每台电脑第一次需要信任一次）。</p>
-      <a id="add-setup" class="primary" href="#" target="_blank" rel="noopener">在 Safari 里打开这台电脑的设置页</a>
-      <p class="hint">在设置页里直接打开并点“访问此网站”，或者安装证书（更稳定），然后回到这里：</p>
+      <a id="add-setup" class="primary" href="#" target="_blank" rel="noopener">在浏览器里打开这台电脑的设置页</a>
+      <p class="hint">在设置页里直接打开并信任（iPhone 点“访问此网站”，安卓 Chrome 点“高级 → 继续前往”），或者安装证书（更稳定），然后回到这里：</p>
       <button id="add-retry" class="secondary" type="button">已信任，重试</button>
     </div>
     <div id="add-code" hidden>

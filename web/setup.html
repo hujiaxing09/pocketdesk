@@ -21,6 +21,7 @@
   #checking { color: var(--muted); }
   #ok { padding: 12px 14px; border-radius: 10px; background: var(--code); margin-bottom: 20px; }
   #ok b { color: var(--ok); }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -29,26 +30,45 @@
 <div id="ok" hidden>
   <b>✓ 这部手机已经可以连接这台电脑。</b><br>
   <a class="btn" id="open-now" href="#">打开 PocketDesk</a>
-  <p class="sub" style="margin:10px 0 0">如果之前是点“访问此网站”进来的，也可以继续这样用；
-  偶尔又提示不安全时，再点一次“访问此网站”就行。想彻底不提示，可以按下面的步骤安装证书。</p>
+  <p class="sub" style="margin:10px 0 0">如果之前是直接信任进来的（<span class="trust-word"></span>），也可以继续这样用；
+  偶尔又提示不安全时，再点一次就行。想彻底不提示，可以按下面的步骤安装证书。</p>
 </div>
 <div id="steps" hidden>
   <p class="sub" id="steps-sub">第一次连接这台电脑，需要先信任它的证书，有两种方式（每部手机对每台电脑只做一次）：</p>
   <p id="way1"><b>方式一：直接打开（最省事）</b><br>
-    点下面的按钮，Safari 提示“此连接不是私密连接”时，点“显示详细信息 → 访问此网站”。<br>
+    <span class="ios">点下面的按钮，Safari 提示“此连接不是私密连接”时，点“显示详细信息 → 访问此网站”。</span>
+    <span class="android">点下面的按钮，Chrome 提示“您的连接不是私密连接”时，点“高级 → 继续前往 …（不安全）”。</span><br>
     <a class="btn" id="open-direct" href="#">直接打开 PocketDesk</a></p>
   <p id="way2"><b>方式二：安装证书（更稳定）</b>：以后不会再提示，切换电脑时也一定能连上。</p>
-  <ol>
+
+  <ol class="ios">
     <li>下载这台电脑的证书：<br>
       <a class="btn" href="/ca.crt">下载证书</a><br>
       弹出“此网站正尝试下载一个配置描述文件”时，点“允许”。</li>
     <li>打开“设置”，点顶部的“已下载描述文件”，然后点“安装”（需要输入锁屏密码）。</li>
     <li>打开“设置 → 通用 → 关于本机 → 证书信任设置”，打开 <code>{{CA_NAME}}</code> 的开关。</li>
     <li>回到 Safari，打开 PocketDesk：<br>
-      <a class="btn" id="open" href="#">打开 PocketDesk</a></li>
+      <a class="btn open" href="#">打开 PocketDesk</a></li>
+  </ol>
+
+  <ol class="android">
+    <li>下载这台电脑的证书，会存到“下载”文件夹：<br>
+      <a class="btn" href="/ca.crt" download="{{CA_NAME}}.crt">下载证书</a></li>
+    <li>打开“设置”，在顶部搜索框搜 <code>CA 证书</code>，点“安装 CA 证书”（或“从存储设备安装”），
+      提示有风险时点“仍然安装”，然后在“下载”里选 <code>{{CA_NAME}}.crt</code>。<br>
+      <span class="sub">搜不到时可以找：设置 → 安全 → 更多安全设置 → 加密与凭据 → 安装证书 → CA 证书。各品牌位置略有不同。</span></li>
+    <li>回到 Chrome，打开 PocketDesk：<br>
+      <a class="btn open" href="#">打开 PocketDesk</a><br>
+      <span class="sub">建议用 Chrome 或 Edge。Firefox 默认不认手机里装的证书，只能用方式一。</span></li>
   </ol>
 </div>
 <script>
+  const android = /Android/.test(navigator.userAgent);
+  // 安卓显示安卓的步骤，其余（iPhone、iPad）显示 iOS 的步骤
+  for (const el of document.querySelectorAll(android ? '.ios' : '.android')) el.hidden = true;
+  for (const el of document.querySelectorAll('.trust-word')) {
+    el.textContent = android ? '“高级 → 继续前往”' : '“访问此网站”';
+  }
   // 二维码里带着一次性配对码，原样带到 HTTPS 页面
   const query = new URLSearchParams(location.search);
   const pair = query.get('pair');
@@ -56,9 +76,7 @@
   const phone = (query.get('p') || '').replace(/[^0-9a-f]/g, '');
   const target = 'https://' + location.hostname + ':{{HTTPS_PORT}}/' + (phone ? '?p=' + phone : '') +
     (pair ? '#pair=' + pair : '');
-  document.getElementById('open').href = target;
-  document.getElementById('open-now').href = target;
-  document.getElementById('open-direct').href = target;
+  for (const a of document.querySelectorAll('.open, #open-now, #open-direct')) a.href = target;
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000));
   Promise.race([fetch('https://' + location.hostname + ':{{HTTPS_PORT}}/api/ping', { cache: 'no-store' }), timeout])
     .then(() => {
