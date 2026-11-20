@@ -2,17 +2,106 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PocketDesk">
 <meta name="theme-color" content="#000000">
+<link rel="icon" href="icon.ico">
+<link rel="apple-touch-icon" href="icon-256.png">
 <title>PocketDesk</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<video id="screen" autoplay playsinline muted></video>
-<div id="status">正在连接…</div>
-<pre id="stats"></pre>
-<button id="play" hidden>点这里开始播放</button>
-<script src="app.js"></script>
+<div id="stage">
+  <video id="screen" autoplay playsinline muted disablepictureinpicture disableremoteplayback></video>
+</div>
+
+<div id="status" role="status"></div>
+<pre id="stats" hidden></pre>
+
+<!-- 右上角：键盘和菜单 -->
+<div id="fab">
+  <button id="kb-button" type="button" aria-label="键盘">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h1M9.5 10h1M13 10h1M16.5 10h1M6 13.5h1M17 13.5h1M9 14h6"/></svg>
+  </button>
+  <button id="menu-button" type="button" aria-label="菜单">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"/></svg>
+  </button>
+</div>
+
+<!-- 菜单 -->
+<div id="sheet" hidden>
+  <div class="sheet-body">
+    <section>
+      <h2>操作方式</h2>
+      <div class="seg" id="mode">
+        <button type="button" data-value="touch">触控</button>
+        <button type="button" data-value="trackpad">触控板</button>
+      </div>
+      <p class="hint" id="mode-hint"></p>
+    </section>
+    <section id="trackpad-settings">
+      <h2>触控板灵敏度 <span id="sens-value"></span></h2>
+      <input id="sensitivity" type="range" min="0.3" max="3" step="0.1">
+    </section>
+    <section id="output-section" hidden>
+      <h2>显示器</h2>
+      <div class="seg" id="output"></div>
+    </section>
+    <section>
+      <h2>画质</h2>
+      <div class="seg" id="bitrate">
+        <button type="button" data-value="auto">自动</button>
+        <button type="button" data-value="4000">省流</button>
+        <button type="button" data-value="10000">清晰</button>
+        <button type="button" data-value="20000">高清</button>
+      </div>
+      <div class="seg" id="scale">
+        <button type="button" data-value="0">原始分辨率</button>
+        <button type="button" data-value="1080">1080p</button>
+        <button type="button" data-value="720">720p</button>
+      </div>
+      <div class="seg" id="fps">
+        <button type="button" data-value="60">60 帧</button>
+        <button type="button" data-value="30">30 帧</button>
+      </div>
+    </section>
+    <section class="row">
+      <label class="switch"><input id="show-stats" type="checkbox"> 显示统计</label>
+    </section>
+    <p class="hint">全屏使用：在 Safari 里点“共享 → 添加到主屏幕”，以后从主屏幕图标打开。授权会一起带过去，不用再扫码。</p>
+    <button id="sheet-close" class="primary" type="button">完成</button>
+  </div>
+</div>
+
+<!-- 键盘：隐藏的输入框负责唤起 iPhone 键盘，上面一排是 Windows 特殊键 -->
+<input id="kb-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" aria-label="输入到电脑">
+<div id="keybar" hidden>
+  <button type="button" data-vk="27">Esc</button>
+  <button type="button" data-vk="9">Tab</button>
+  <button type="button" data-mod="17">Ctrl</button>
+  <button type="button" data-mod="18">Alt</button>
+  <button type="button" data-mod="16">Shift</button>
+  <button type="button" data-mod="91">⊞</button>
+  <button type="button" data-vk="37">←</button>
+  <button type="button" data-vk="38">↑</button>
+  <button type="button" data-vk="40">↓</button>
+  <button type="button" data-vk="39">→</button>
+  <button type="button" data-vk="46">Del</button>
+  <button type="button" id="kb-close" aria-label="收起键盘">⌄</button>
+</div>
+
+<!-- 未授权 -->
+<div id="auth" hidden>
+  <div class="card">
+    <h1>这部手机还没有授权</h1>
+    <p>在电脑右下角找到 PocketDesk 图标，点一下打开二维码，然后用 iPhone 相机扫描。</p>
+    <p class="hint" id="auth-detail"></p>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
 </body>
 </html>

@@ -5,36 +5,50 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PocketDesk 首次设置</title>
 <style>
-  body { margin: 0; padding: 20px 16px 40px; background: #fff; color: #1c1c1e;
+  :root { --bg: #fff; --fg: #1c1c1e; --muted: #6c6c70; --code: #f2f2f7; --accent: #0a7aff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #000; --fg: #f2f2f7; --muted: #98989f; --code: #1c1c1e; --accent: #0a84ff; }
+  }
+  body { margin: 0; padding: 20px 16px 40px; background: var(--bg); color: var(--fg);
          font: 16px/1.55 -apple-system, system-ui, sans-serif; }
   h1 { font-size: 22px; margin: 0 0 4px; }
-  .sub { color: #6c6c70; margin: 0 0 20px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
   ol { padding-left: 22px; }
   li { margin-bottom: 14px; }
   .btn { display: inline-block; margin-top: 6px; padding: 10px 16px; border-radius: 8px;
-         background: #2a6df4; color: #fff; text-decoration: none; font-weight: 600; }
-  code { background: #f2f2f7; padding: 1px 5px; border-radius: 4px; }
-  @media (prefers-color-scheme: dark) {
-    body { background: #000; color: #f2f2f7; }
-    .sub { color: #98989f; }
-    code { background: #1c1c1e; }
-  }
+         background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  #checking { color: var(--muted); }
 </style>
 </head>
 <body>
-<h1>PocketDesk 首次设置</h1>
-<p class="sub">每部手机对每台电脑只需要做一次。</p>
-<ol>
-  <li>下载这台电脑的证书：<br>
-    <a class="btn" href="/ca.crt">下载证书</a><br>
-    弹出“此网站正尝试下载一个配置描述文件”时，点“允许”。</li>
-  <li>打开“设置”，点顶部的“已下载描述文件”，然后点“安装”（需要输入锁屏密码）。</li>
-  <li>打开“设置 → 通用 → 关于本机 → 证书信任设置”，打开 <code>{{CA_NAME}}</code> 的开关。</li>
-  <li>回到 Safari，打开画面：<br>
-    <a class="btn" id="open" href="#">打开 PocketDesk</a></li>
-</ol>
+<h1>PocketDesk</h1>
+<p id="checking">正在检查这部手机是否已经信任这台电脑…</p>
+<div id="steps" hidden>
+  <p class="sub">第一次连接这台电脑，需要先信任它的证书。每部手机对每台电脑只做一次。</p>
+  <ol>
+    <li>下载这台电脑的证书：<br>
+      <a class="btn" href="/ca.crt">下载证书</a><br>
+      弹出“此网站正尝试下载一个配置描述文件”时，点“允许”。</li>
+    <li>打开“设置”，点顶部的“已下载描述文件”，然后点“安装”（需要输入锁屏密码）。</li>
+    <li>打开“设置 → 通用 → 关于本机 → 证书信任设置”，打开 <code>{{CA_NAME}}</code> 的开关。</li>
+    <li>回到 Safari，打开 PocketDesk：<br>
+      <a class="btn" id="open" href="#">打开 PocketDesk</a></li>
+  </ol>
+</div>
 <script>
-  document.getElementById('open').href = 'https://' + location.hostname + ':{{HTTPS_PORT}}/';
+  // 二维码里带着一次性配对码，原样带到 HTTPS 页面
+  const pair = new URLSearchParams(location.search).get('pair');
+  const target = 'https://' + location.hostname + ':{{HTTPS_PORT}}/' + (pair ? '#pair=' + pair : '');
+  document.getElementById('open').href = target;
+  // 已经信任证书的手机直接跳过去
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000));
+  Promise.race([fetch('https://' + location.hostname + ':{{HTTPS_PORT}}/api/ping', { cache: 'no-store' }), timeout])
+    .then(() => location.replace(target))
+    .catch(() => {
+      document.getElementById('checking').hidden = true;
+      document.getElementById('steps').hidden = false;
+    });
 </script>
 </body>
 </html>

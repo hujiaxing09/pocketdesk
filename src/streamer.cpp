@@ -33,6 +33,7 @@ uint32_t randomSsrc() {
 
 struct Streamer::Session {
 	std::string id;
+	std::string deviceName;
 	std::shared_ptr<rtc::PeerConnection> pc;
 	std::shared_ptr<rtc::Track> track;
 	std::shared_ptr<rtc::RtpPacketizationConfig> rtp;
@@ -55,9 +56,11 @@ Streamer::~Streamer() {
 		s->pc->close();
 }
 
-bool Streamer::createSession(std::string &id, std::string &offerSdp) {
+bool Streamer::createSession(const std::string &deviceName, std::string &id,
+                             std::string &offerSdp) {
 	auto s = std::make_shared<Session>();
 	s->id = randomId();
+	s->deviceName = deviceName;
 
 	rtc::Configuration cfg;
 	cfg.portRangeBegin = mOptions.portBegin;
@@ -75,7 +78,7 @@ bool Streamer::createSession(std::string &id, std::string &offerSdp) {
 		});
 
 		std::weak_ptr<Session> weak = s;
-		s->pc->onStateChange([weak](rtc::PeerConnection::State st) {
+		s->pc->onStateChange([this, weak](rtc::PeerConnection::State st) {
 			auto s = weak.lock();
 			if (!s)
 				return;
@@ -84,8 +87,11 @@ bool Streamer::createSession(std::string &id, std::string &offerSdp) {
 				s->connected = true;
 				log("[{}] 已连接", s->id);
 			} else if (st == St::Disconnected || st == St::Failed || st == St::Closed) {
-				if (!s->dead.exchange(true))
+				if (!s->dead.exchange(true)) {
 					log("[{}] 连接结束（{}）", s->id, int(st));
+					if (mOptions.onClosed)
+						mOptions.onClosed(s->id);
+				}
 			}
 		});
 
@@ -118,13 +124,18 @@ bool Streamer::createSession(std::string &id, std::string &offerSdp) {
 		});
 
 		s->control = s->pc->createDataChannel("control");
-		// 手机每 2 秒发回自己的统计（解码帧率、缓冲、丢包），写进日志方便分析
-		s->control->onMessage([weak](rtc::message_variant msg) {
+		// 输入、设置和手机统计都走这条通道
+		s->control->onMessage([this, weak](rtc::message_variant msg) {
 			auto s = weak.lock();
-			if (!s)
+			if (!s || !mOptions.onMessage)
 				return;
 			if (auto text = std::get_if<std::string>(&msg))
-				log("[{}] 手机统计 {}", s->id, *text);
+				mOptions.onMessage(s->id, *text);
+		});
+		s->control->onOpen([this, weak] {
+			auto s = weak.lock();
+			if (s && mOptions.onControlOpen)
+				mOptions.onControlOpen(s->id);
 		});
 		s->pc->setLocalDescription(rtc::Description::Type::Offer);
 
@@ -147,7 +158,7 @@ bool Streamer::createSession(std::string &id, std::string &offerSdp) {
 		std::lock_guard lock(mMutex);
 		mSessions[s->id] = s;
 	}
-	log("[{}] 已发出 offer", s->id);
+	log("[{}] 已发出 offer（{}）", s->id, deviceName);
 	return true;
 }
 
@@ -202,6 +213,35 @@ void Streamer::sendVideo(const uint8_t *data, size_t size, bool keyframe) {
 		} catch (const std::exception &e) {
 			log("[{}] 发送视频失败: {}", id, e.what());
 		}
+	}
+}
+
+int Streamer::viewerCount() {
+	std::lock_guard lock(mMutex);
+	int n = 0;
+	for (auto &[id, s] : mSessions)
+		if (!s->dead && s->connected)
+			++n;
+	return n;
+}
+
+std::string Streamer::deviceName(const std::string &id) {
+	std::lock_guard lock(mMutex);
+	auto it = mSessions.find(id);
+	return it == mSessions.end() ? std::string() : it->second->deviceName;
+}
+
+void Streamer::sendControlTo(const std::string &id, const std::string &json) {
+	std::lock_guard lock(mMutex);
+	auto it = mSessions.find(id);
+	if (it == mSessions.end())
+		return;
+	auto &s = it->second;
+	if (s->dead || !s->control || !s->control->isOpen())
+		return;
+	try {
+		s->control->send(json);
+	} catch (const std::exception &) {
 	}
 }
 

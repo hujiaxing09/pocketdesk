@@ -76,6 +76,10 @@ bool DesktopCapture::open(int outputIndex) {
 	mOutput = chosen->output;
 	vendorId = chosen->info.vendorId;
 	adapterName = chosen->info.adapterName;
+	this->outputIndex = chosen->info.index; // 参数同名，必须写 this->
+	isPrimary = chosen->info.primary;
+	desktopRect = chosen->info.rect;
+	mPointer = PointerState{};
 
 	const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
 	// VIDEO_SUPPORT：FFmpeg 的 D3D11 硬件上下文和视频处理器都需要
@@ -130,7 +134,9 @@ void DesktopCapture::close() {
 	mAdapter.Reset();
 }
 
-DesktopCapture::Result DesktopCapture::acquire(UINT timeoutMs, int64_t &presentQpc) {
+DesktopCapture::Result DesktopCapture::acquire(UINT timeoutMs, int64_t &presentQpc,
+                                               bool &pointerChanged) {
+	pointerChanged = false;
 	if (!mDup)
 		return Result::Lost;
 	DXGI_OUTDUPL_FRAME_INFO info{};
@@ -142,6 +148,28 @@ DesktopCapture::Result DesktopCapture::acquire(UINT timeoutMs, int64_t &presentQ
 		log("AcquireNextFrame 失败 {}，重新建立桌面复制", hexhr(hr));
 		mDup.Reset();
 		return Result::Lost;
+	}
+
+	// 指针：位置只在 LastMouseUpdateTime 非 0 时有效；Visible 为假表示指针不在这块屏上或被隐藏
+	if (info.LastMouseUpdateTime.QuadPart != 0) {
+		const bool visible = info.PointerPosition.Visible != FALSE;
+		const POINT pos = info.PointerPosition.Position;
+		if (visible != mPointer.visible ||
+		    (visible && (pos.x != mPointer.pos.x || pos.y != mPointer.pos.y)))
+			pointerChanged = true;
+		mPointer.visible = visible;
+		if (visible)
+			mPointer.pos = pos;
+	}
+	if (info.PointerShapeBufferSize > 0) {
+		mPointer.shape.resize(info.PointerShapeBufferSize);
+		UINT required = 0;
+		hr = mDup->GetFramePointerShape(UINT(mPointer.shape.size()), mPointer.shape.data(), &required,
+		                                &mPointer.shapeInfo);
+		if (SUCCEEDED(hr)) {
+			++mPointer.shapeVersion;
+			pointerChanged = true;
+		}
 	}
 
 	Result result = Result::Timeout;

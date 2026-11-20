@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -24,21 +25,28 @@ public:
 		uint16_t portBegin = 47500; // ICE 用的 UDP 端口范围，方便以后写防火墙规则
 		uint16_t portEnd = 47599;
 		int playoutDelayMaxMs = 0;  // 通过 playout-delay 扩展请求手机尽量不缓冲
+		// 以下回调在 libdatachannel 的线程里调用，不能阻塞
+		std::function<void(const std::string &id, const std::string &text)> onMessage;
+		std::function<void(const std::string &id)> onControlOpen;
+		std::function<void(const std::string &id)> onClosed;
 	};
 
 	explicit Streamer(Options options);
 	~Streamer();
 
-	bool createSession(std::string &id, std::string &offerSdp);
+	bool createSession(const std::string &deviceName, std::string &id, std::string &offerSdp);
 	bool acceptAnswer(const std::string &id, const std::string &answerSdp);
 
 	bool hasViewers();
+	int viewerCount();
+	std::string deviceName(const std::string &id);
 	// 有新连接或手机请求关键帧（PLI）时为 true，读取后清零
 	bool takeKeyframeRequest() { return mKeyRequest.exchange(false); }
 	int takePliCount() { return mPliCount.exchange(0); }
 
 	void sendVideo(const uint8_t *data, size_t size, bool keyframe);
 	void sendControl(const std::string &json);
+	void sendControlTo(const std::string &id, const std::string &json);
 	// 清理已断开或超时未连上的连接；在截屏线程里定期调用
 	void sweep();
 

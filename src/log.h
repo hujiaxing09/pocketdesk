@@ -1,8 +1,13 @@
 #pragma once
+#include <filesystem>
 #include <format>
 #include <string>
 
 namespace pd {
+
+// 日志同时写到控制台（如果有）和 dir 下按天分的文件，保留 14 天
+void initLogFile(const std::filesystem::path &dir);
+std::filesystem::path logDir();
 
 void logLine(const std::string &line);
 

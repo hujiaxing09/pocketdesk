@@ -136,6 +136,19 @@ bool VideoEncoder::open(ID3D11Device *device, const EncoderConfig &cfg) {
 	return true;
 }
 
+bool VideoEncoder::setBitrate(int kbps) {
+	if (!mCtx)
+		return false;
+	if (mCfg.name != "h264_nvenc")
+		return false;
+	// FFmpeg 的 NVENC 在下一帧编码前发现码率变了，会调用 nvEncReconfigureEncoder
+	mCfg.bitrateKbps = kbps;
+	mCtx->bit_rate = int64_t(kbps) * 1000;
+	mCtx->rc_max_rate = mCtx->bit_rate;
+	mCtx->rc_buffer_size = int(mCtx->bit_rate / mCfg.fps);
+	return true;
+}
+
 void VideoEncoder::close() {
 	if (mCtx)
 		avcodec_free_context(&mCtx);

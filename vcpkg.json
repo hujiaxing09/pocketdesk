@@ -27,7 +27,8 @@
         "qsv"
       ]
     },
-    "nlohmann-json"
+    "nlohmann-json",
+    "nayuki-qr-code-generator"
   ],
   "builtin-baseline": "4b089e9116ef2715919c32dd6ca3ab98bc341eb8",
   "overrides": [

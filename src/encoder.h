@@ -36,6 +36,9 @@ public:
 	bool isOpen() const { return mCtx != nullptr; }
 	const EncoderConfig &config() const { return mCfg; }
 
+	// 修改码率。NVENC 支持在编码过程中直接改；其他编码器返回 false，需要重开编码器
+	bool setBitrate(int kbps);
+
 	// 从编码器的纹理池里取一帧，调用方把画面画进 (tex, slice)
 	bool beginFrame(ID3D11Texture2D **tex, UINT *slice);
 	// 编码这一帧，输出的 Annex B 码流交给 onPacket；IDR 一定带 SPS/PPS
