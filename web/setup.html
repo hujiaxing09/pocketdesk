@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PocketDesk 首次设置</title>
 <style>
-  :root { --bg: #fff; --fg: #1c1c1e; --muted: #6c6c70; --code: #f2f2f7; --accent: #0a7aff; }
+  :root { --bg: #fff; --fg: #1c1c1e; --muted: #6c6c70; --code: #f2f2f7; --accent: #0a7aff; --ok: #1f9d55; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #000; --fg: #f2f2f7; --muted: #98989f; --code: #1c1c1e; --accent: #0a84ff; }
+    :root { --bg: #000; --fg: #f2f2f7; --muted: #98989f; --code: #1c1c1e; --accent: #0a84ff; --ok: #30d158; }
   }
   body { margin: 0; padding: 20px 16px 40px; background: var(--bg); color: var(--fg);
          font: 16px/1.55 -apple-system, system-ui, sans-serif; }
@@ -19,13 +19,25 @@
          background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
   code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
   #checking { color: var(--muted); }
+  #ok { padding: 12px 14px; border-radius: 10px; background: var(--code); margin-bottom: 20px; }
+  #ok b { color: var(--ok); }
 </style>
 </head>
 <body>
 <h1>PocketDesk</h1>
-<p id="checking">正在检查这部手机是否已经信任这台电脑…</p>
+<p id="checking">正在检查这部手机能不能连接这台电脑…</p>
+<div id="ok" hidden>
+  <b>✓ 这部手机已经可以连接这台电脑。</b><br>
+  <a class="btn" id="open-now" href="#">打开 PocketDesk</a>
+  <p class="sub" style="margin:10px 0 0">如果之前是点“访问此网站”进来的，也可以继续这样用；
+  偶尔又提示不安全时，再点一次“访问此网站”就行。想彻底不提示，可以按下面的步骤安装证书。</p>
+</div>
 <div id="steps" hidden>
-  <p class="sub">第一次连接这台电脑，需要先信任它的证书。每部手机对每台电脑只做一次。</p>
+  <p class="sub" id="steps-sub">第一次连接这台电脑，需要先信任它的证书，有两种方式（每部手机对每台电脑只做一次）：</p>
+  <p id="way1"><b>方式一：直接打开（最省事）</b><br>
+    点下面的按钮，Safari 提示“此连接不是私密连接”时，点“显示详细信息 → 访问此网站”。<br>
+    <a class="btn" id="open-direct" href="#">直接打开 PocketDesk</a></p>
+  <p id="way2"><b>方式二：安装证书（更稳定）</b>：以后不会再提示，切换电脑时也一定能连上。</p>
   <ol>
     <li>下载这台电脑的证书：<br>
       <a class="btn" href="/ca.crt">下载证书</a><br>
@@ -38,13 +50,27 @@
 </div>
 <script>
   // 二维码里带着一次性配对码，原样带到 HTTPS 页面
-  const pair = new URLSearchParams(location.search).get('pair');
-  const target = 'https://' + location.hostname + ':{{HTTPS_PORT}}/' + (pair ? '#pair=' + pair : '');
+  const query = new URLSearchParams(location.search);
+  const pair = query.get('pair');
+  // 手机编号（从 PocketDesk 里点过来时带着），让电脑认出是同一部手机
+  const phone = (query.get('p') || '').replace(/[^0-9a-f]/g, '');
+  const target = 'https://' + location.hostname + ':{{HTTPS_PORT}}/' + (phone ? '?p=' + phone : '') +
+    (pair ? '#pair=' + pair : '');
   document.getElementById('open').href = target;
-  // 已经信任证书的手机直接跳过去
+  document.getElementById('open-now').href = target;
+  document.getElementById('open-direct').href = target;
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000));
   Promise.race([fetch('https://' + location.hostname + ':{{HTTPS_PORT}}/api/ping', { cache: 'no-store' }), timeout])
-    .then(() => location.replace(target))
+    .then(() => {
+      // 相机扫码进来、已经能连上：直接去授权；否则停在这页，证书步骤仍然可以做
+      if (pair) { location.replace(target); return; }
+      document.getElementById('checking').hidden = true;
+      document.getElementById('ok').hidden = false;
+      document.getElementById('steps').hidden = false;
+      document.getElementById('steps-sub').textContent = '想更稳定的话，可以安装这台电脑的证书：';
+      document.getElementById('way1').hidden = true;
+      document.getElementById('way2').hidden = true;
+    })
     .catch(() => {
       document.getElementById('checking').hidden = true;
       document.getElementById('steps').hidden = false;

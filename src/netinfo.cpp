@@ -15,8 +15,8 @@ static bool isPrivate(uint32_t hostOrder) {
 	return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
 }
 
-std::vector<std::string> localLanIPv4() {
-	std::vector<std::string> result;
+std::vector<LanInterface> lanInterfaces() {
+	std::vector<LanInterface> result;
 	ULONG size = 32 * 1024;
 	std::vector<unsigned char> buf(size);
 	ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
@@ -36,15 +36,28 @@ std::vector<std::string> localLanIPv4() {
 			auto *sin = reinterpret_cast<sockaddr_in *>(u->Address.lpSockaddr);
 			if (sin->sin_family != AF_INET)
 				continue;
-			if (!isPrivate(ntohl(sin->sin_addr.s_addr)))
+			const uint32_t host = ntohl(sin->sin_addr.s_addr);
+			if (!isPrivate(host))
 				continue;
-			char text[INET_ADDRSTRLEN] = {};
+			const UINT8 prefix = std::min<UINT8>(u->OnLinkPrefixLength, 32);
+			const uint32_t mask = prefix ? 0xFFFFFFFFu << (32 - prefix) : 0;
+			in_addr bc{};
+			bc.s_addr = htonl(host | ~mask);
+			char text[INET_ADDRSTRLEN] = {}, bcText[INET_ADDRSTRLEN] = {};
 			inet_ntop(AF_INET, &sin->sin_addr, text, sizeof(text));
-			if (std::find(result.begin(), result.end(), text) == result.end())
-				result.emplace_back(text);
+			inet_ntop(AF_INET, &bc, bcText, sizeof(bcText));
+			if (std::none_of(result.begin(), result.end(), [&](auto &i) { return i.ip == text; }))
+				result.push_back({text, bcText});
 		}
 	}
 	return result;
+}
+
+std::vector<std::string> localLanIPv4() {
+	std::vector<std::string> ips;
+	for (auto &i : lanInterfaces())
+		ips.push_back(i.ip);
+	return ips;
 }
 
 std::string hostName() {

@@ -34,6 +34,7 @@ uint32_t randomSsrc() {
 struct Streamer::Session {
 	std::string id;
 	std::string deviceName;
+	std::string deviceId;
 	std::shared_ptr<rtc::PeerConnection> pc;
 	std::shared_ptr<rtc::Track> track;
 	std::shared_ptr<rtc::RtpPacketizationConfig> rtp;
@@ -56,11 +57,12 @@ Streamer::~Streamer() {
 		s->pc->close();
 }
 
-bool Streamer::createSession(const std::string &deviceName, std::string &id,
-                             std::string &offerSdp) {
+bool Streamer::createSession(const std::string &deviceName, const std::string &deviceId,
+                             std::string &id, std::string &offerSdp) {
 	auto s = std::make_shared<Session>();
 	s->id = randomId();
 	s->deviceName = deviceName;
+	s->deviceId = deviceId;
 
 	rtc::Configuration cfg;
 	cfg.portRangeBegin = mOptions.portBegin;
@@ -214,6 +216,25 @@ void Streamer::sendVideo(const uint8_t *data, size_t size, bool keyframe) {
 			log("[{}] 发送视频失败: {}", id, e.what());
 		}
 	}
+}
+
+int Streamer::closeDevice(const std::string &deviceId) {
+	if (deviceId.empty())
+		return 0;
+	std::vector<std::shared_ptr<Session>> closing;
+	{
+		std::lock_guard lock(mMutex);
+		for (auto &[id, s] : mSessions)
+			if (s->deviceId == deviceId && !s->dead.exchange(true))
+				closing.push_back(s);
+	}
+	for (auto &s : closing) {
+		log("[{}] 授权已移除，断开连接", s->id);
+		if (mOptions.onClosed)
+			mOptions.onClosed(s->id);
+		s->pc->close();
+	}
+	return int(closing.size());
 }
 
 int Streamer::viewerCount() {

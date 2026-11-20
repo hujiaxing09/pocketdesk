@@ -3,6 +3,7 @@
 #include "certs.h"
 #include "cursor.h"
 #include "devices.h"
+#include "discovery.h"
 #include "encoder.h"
 #include "input.h"
 #include "log.h"
@@ -31,6 +32,8 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 std::atomic<bool> gRunning{true};
+constexpr const char *kVersion = "0.3.0";
+std::filesystem::path gDataDir; // 证书、授权记录、日志都放这里，启动时确定
 
 struct Args {
 	int output = -1;
@@ -42,6 +45,9 @@ struct Args {
 	int playoutDelayMaxMs = 0;
 	std::filesystem::path webDir;
 	bool listOnly = false;
+	std::filesystem::path dataDir;
+	std::string name;           // 显示名，默认是计算机名
+	int discoveryPort = 47100;  // 局域网发现用的 UDP 端口
 };
 
 // 码率范围（kbps）
@@ -110,6 +116,12 @@ bool parseArgs(Args &a) {
 				a.playoutDelayMaxMs = std::stoi(next());
 			else if (k == "--web" && i + 1 < argc)
 				a.webDir = argv[++i];
+			else if (k == "--data" && i + 1 < argc)
+				a.dataDir = argv[++i];
+			else if (k == "--name")
+				a.name = next();
+			else if (k == "--discovery-port")
+				a.discoveryPort = std::stoi(next());
 			else {
 				log("不认识的参数 {}", k);
 				return false;
@@ -129,9 +141,74 @@ std::filesystem::path exeDir() {
 	return std::filesystem::path(buf).parent_path();
 }
 
-std::filesystem::path dataDir() {
+std::filesystem::path dataDir() { return gDataDir; }
+
+// 以前版本的数据位置
+std::filesystem::path legacyDataDir() {
 	const wchar_t *local = _wgetenv(L"LOCALAPPDATA");
 	return std::filesystem::path(local ? local : L".") / L"PocketDesk";
+}
+
+bool writable(const std::filesystem::path &dir) {
+	std::error_code ec;
+	std::filesystem::create_directories(dir, ec);
+	if (ec)
+		return false;
+	const auto probe = dir / L".write-test";
+	HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+	                       FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+	if (h == INVALID_HANDLE_VALUE)
+		return false;
+	CloseHandle(h);
+	return true;
+}
+
+// 把 from 里的内容搬到 to（跨盘时先复制再删），成功后删掉 from
+bool moveTree(const std::filesystem::path &from, const std::filesystem::path &to, std::string &err) {
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	fs::create_directories(to, ec);
+	for (auto &e : fs::directory_iterator(from, ec)) {
+		const auto dest = to / e.path().filename();
+		fs::rename(e.path(), dest, ec);
+		if (ec) {
+			ec.clear();
+			fs::copy(e.path(), dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+			if (ec) {
+				err = ec.message();
+				return false;
+			}
+		}
+	}
+	fs::remove_all(from, ec);
+	return true;
+}
+
+// 数据目录：优先放在程序旁边的 data 文件夹（删掉程序文件夹就删干净了）；
+// 程序文件夹不可写（例如装在 Program Files）时放到 %LOCALAPPDATA%\PocketDesk。
+// 返回给日志看的说明。
+std::string chooseDataDir(const Args &args) {
+	namespace fs = std::filesystem;
+	if (!args.dataDir.empty()) {
+		gDataDir = args.dataDir;
+		return "命令行指定";
+	}
+	const auto portable = exeDir() / L"data";
+	if (!writable(portable)) {
+		gDataDir = legacyDataDir();
+		return "用户目录（程序文件夹不可写）";
+	}
+	gDataDir = portable;
+	// 第一次用新版本：把以前放在 %LOCALAPPDATA% 里的证书、授权记录和日志搬过来，手机不用重新授权
+	const auto old = legacyDataDir();
+	std::error_code ec;
+	if (fs::exists(old / L"certs", ec) && !fs::exists(portable / L"certs", ec)) {
+		std::string err;
+		if (moveTree(old, portable, err))
+			return "程序文件夹（已把 " + old.string() + " 里的旧数据搬过来）";
+		return "程序文件夹（搬旧数据失败：" + err + "）";
+	}
+	return "程序文件夹";
 }
 
 int64_t qpcNow() {
@@ -485,14 +562,15 @@ void openUrl(const std::wstring &url) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-	initLogFile(dataDir() / "logs");
 
 	Args args;
 	if (!parseArgs(args))
 		return 2;
+	const std::string dataNote = chooseDataDir(args);
+	initLogFile(dataDir() / "logs");
 	const std::wstring pairUrl = L"http://127.0.0.1:" + std::to_wstring(args.httpPort) + L"/pair";
 
-	log("PocketDesk 启动");
+	log("PocketDesk {} 启动，数据目录 {}（{}）", kVersion, dataDir().string(), dataNote);
 	for (auto &o : listOutputs())
 		log("  显示器 {}{}: {} [{},{} {}x{}] 显卡 {} (0x{:04X})", o.index, o.primary ? "（主）" : "",
 		    o.deviceName, o.rect.left, o.rect.top, o.rect.right - o.rect.left,
@@ -501,7 +579,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 		return 0;
 
 	// 只允许运行一个；再次启动时打开配对页
-	HANDLE singleton = CreateMutexW(nullptr, TRUE, L"Local\\PocketDesk.Next");
+	std::wstring mutexName = L"Local\\PocketDesk.Next";
+	if (!args.dataDir.empty())
+		mutexName += L"." + std::to_wstring(std::hash<std::wstring>{}(args.dataDir.wstring()));
+	HANDLE singleton = CreateMutexW(nullptr, TRUE, mutexName.c_str());
 	if (GetLastError() == ERROR_ALREADY_EXISTS) {
 		log("PocketDesk 已经在运行，打开配对页");
 		openUrl(pairUrl);
@@ -515,7 +596,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	const auto ips = localLanIPv4();
 
 	CertFiles certs;
-	if (!ensureCertificates(dataDir() / "certs", host, ips, certs)) {
+	const std::string displayName = args.name.empty() ? host : args.name;
+	if (!ensureCertificates(dataDir() / "certs", host, displayName, ips, certs)) {
 		log("证书准备失败");
 		return 1;
 	}
@@ -560,6 +642,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	wo.httpsPort = args.httpsPort;
 	wo.httpPort = args.httpPort;
 	wo.lanIps = ips;
+	wo.pcName = args.name.empty() ? host : args.name;
+	wo.version = kVersion;
+
+	Discovery discovery;
+	discovery.start({certs.pcId, wo.pcName, kVersion, args.httpsPort, args.httpPort},
+	                uint16_t(args.discoveryPort));
+	wo.discovery = &discovery;
 	if (!web.start(wo, certs, streamer, devices)) {
 		MessageBoxW(nullptr, L"PocketDesk 启动失败：端口被占用或证书无效，详见日志。", L"PocketDesk",
 		            MB_ICONERROR);
@@ -611,6 +700,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	tipper.join();
 	input.releaseAll();
 	web.stop();
+	discovery.stop();
 	timeEndPeriod(1);
 	ReleaseMutex(singleton);
 	CloseHandle(singleton);

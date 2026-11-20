@@ -199,3 +199,102 @@ button.primary {
 #auth .card { max-width: 360px; text-align: center; }
 #auth h1 { font-size: 20px; margin: 0 0 12px; }
 #auth p { color: #d1d1d6; }
+
+/* 电脑列表 */
+.pc-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+button.pc {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--chip);
+  text-align: left;
+}
+button.pc.on { background: var(--chip-on); font-weight: 600; }
+button.pc .addr { font-size: 12px; color: var(--muted); white-space: nowrap; margin-left: auto; }
+button.pc .forget, button.pc .rename { padding: 2px 4px 2px 10px; color: var(--muted); font-size: 14px; }
+button.pc.on .rename { color: #fff; }
+button.pc.on .addr { color: #fff; }
+button.pc.new { background: transparent; border: 1px dashed var(--line); }
+button.pc.add { justify-content: center; background: transparent; border: 1px dashed var(--line); color: var(--chip-on); }
+
+/* 添加电脑 */
+#add {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+#add[hidden] { display: none; }
+#add h1 { font-size: 18px; margin: 0 0 12px; }
+#add p { margin: 0 0 10px; }
+.row-form { display: flex; gap: 6px; margin: 8px 0; }
+.row-form input, input.digits {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg);
+  font-size: 16px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.row-form button { padding: 0 16px; border: 0; border-radius: 10px; background: var(--chip-on); }
+input.digits {
+  width: 100%;
+  text-align: center;
+  font-size: 28px;
+  letter-spacing: 0.4em;
+  font-variant-numeric: tabular-nums;
+}
+a.primary, button.primary, button.secondary {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 12px;
+  border: 0;
+  border-radius: 10px;
+  text-align: center;
+  text-decoration: none;
+  font-weight: 600;
+}
+a.primary { background: var(--chip-on); color: #fff; }
+button.secondary { background: var(--chip); }
+
+/* 扫码 */
+#scanner {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: calc(16px + var(--safe-t)) 16px calc(16px + var(--safe-b));
+}
+#scanner[hidden] { display: none; }
+#scan-video { width: min(100%, 480px); max-height: 70vh; border-radius: 12px; object-fit: cover; }
+#scanner button { max-width: 320px; }
+
+#auth .card button { max-width: 320px; margin-left: auto; margin-right: auto; }
+
+/* 暂停 */
+#paused {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.7);
+}
+#paused[hidden] { display: none; }
+#paused .card { max-width: 320px; text-align: center; }

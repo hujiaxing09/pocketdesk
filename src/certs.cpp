@@ -199,7 +199,8 @@ bool leafStillGood(X509 *leaf, EVP_PKEY *leafKey, EVP_PKEY *caKey, const std::st
 } // namespace
 
 bool ensureCertificates(const std::filesystem::path &dir, const std::string &host,
-                        const std::vector<std::string> &ips, CertFiles &out) {
+                        const std::string &displayName, const std::vector<std::string> &ips,
+                        CertFiles &out) {
 	std::error_code ec;
 	std::filesystem::create_directories(dir, ec);
 
@@ -207,7 +208,7 @@ bool ensureCertificates(const std::filesystem::path &dir, const std::string &hos
 	const auto caCertPath = dir / "ca.crt";
 	out.serverCert = dir / "server.crt";
 	out.serverKey = dir / "server.key";
-	out.caName = "PocketDesk CA (" + host + ")";
+	out.caName = "PocketDesk CA (" + displayName + ")";
 	const std::string dnsName = validDnsLabel(host) ? host + ".local" : "";
 
 	KeyPtr caKey = readKey(caKeyPath);
@@ -238,6 +239,13 @@ bool ensureCertificates(const std::filesystem::path &dir, const std::string &hos
 	out.caDer.resize(len);
 	unsigned char *p = reinterpret_cast<unsigned char *>(out.caDer.data());
 	i2d_X509(ca.get(), &p);
+
+	unsigned char md[EVP_MAX_MD_SIZE];
+	unsigned int mdLen = 0;
+	EVP_Digest(out.caDer.data(), out.caDer.size(), md, &mdLen, EVP_sha256(), nullptr);
+	out.pcId.clear();
+	for (unsigned int i = 0; i < 8 && i < mdLen; ++i)
+		out.pcId += std::format("{:02x}", md[i]);
 	return true;
 }
 

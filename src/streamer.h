@@ -34,7 +34,10 @@ public:
 	explicit Streamer(Options options);
 	~Streamer();
 
-	bool createSession(const std::string &deviceName, std::string &id, std::string &offerSdp);
+	bool createSession(const std::string &deviceName, const std::string &deviceId, std::string &id,
+	                   std::string &offerSdp);
+	// 电脑上移除了这部手机的授权：立即断开它的连接
+	int closeDevice(const std::string &deviceId);
 	bool acceptAnswer(const std::string &id, const std::string &answerSdp);
 
 	bool hasViewers();

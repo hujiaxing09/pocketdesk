@@ -16,6 +16,7 @@ namespace pd {
 
 class Streamer;
 class DeviceStore;
+class Discovery;
 
 // HTTPS：页面、配对和信令（Safari 只在 HTTPS 页面里允许 WebRTC）
 // HTTP：首次设置（下载根证书）；另有只允许本机访问的配对页和调试入口
@@ -26,6 +27,9 @@ public:
 		int httpsPort = 47443;
 		int httpPort = 47080;
 		std::vector<std::string> lanIps;
+		std::string pcName;
+		std::string version;
+		Discovery *discovery = nullptr;
 	};
 
 	WebServer();

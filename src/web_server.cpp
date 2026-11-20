@@ -1,5 +1,6 @@
 #include "web_server.h"
 #include "devices.h"
+#include "discovery.h"
 #include "log.h"
 #include "streamer.h"
 
@@ -26,6 +27,33 @@ std::string readFile(const std::filesystem::path &p) {
 void replaceAll(std::string &s, const std::string &from, const std::string &to) {
 	for (size_t pos = 0; (pos = s.find(from, pos)) != std::string::npos; pos += to.size())
 		s.replace(pos, from.size(), to);
+}
+
+// 允许跨域的来源：局域网里其他 PocketDesk 页面（私有地址或 .local 名称），以及本机调试页。
+// 接口本身靠令牌鉴权，这里只是不让互联网上的网页随便调用。
+bool allowedOrigin(const std::string &origin) {
+	std::string rest;
+	if (origin.rfind("https://", 0) == 0)
+		rest = origin.substr(8);
+	else if (origin.rfind("http://127.0.0.1", 0) == 0 || origin.rfind("http://localhost", 0) == 0)
+		return true;
+	else
+		return false;
+	const std::string host = rest.substr(0, rest.find(':'));
+	if (host.size() > 6 && host.compare(host.size() - 6, 6, ".local") == 0)
+		return true;
+	unsigned a = 0, b = 0, c = 0, d = 0;
+	if (sscanf_s(host.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+		return false;
+	return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+
+void addCors(const httplib::Request &req, httplib::Response &res) {
+	const auto origin = req.get_header_value("Origin");
+	if (origin.empty() || !allowedOrigin(origin))
+		return;
+	res.set_header("Access-Control-Allow-Origin", origin);
+	res.set_header("Vary", "Origin");
 }
 
 bool isLoopback(const httplib::Request &req) {
@@ -71,21 +99,52 @@ bool WebServer::start(const Options &options, const CertFiles &certs, Streamer &
 		res.set_header("Content-Disposition", "attachment; filename=\"PocketDesk-CA.crt\"");
 		res.set_content(caDer, "application/x-x509-ca-cert");
 	};
-	auto noStore = [](const httplib::Request &, httplib::Response &res) {
+	auto noStore = [](const httplib::Request &req, httplib::Response &res) {
 		res.set_header("Cache-Control", "no-store");
+		if (req.path.rfind("/api/", 0) == 0)
+			addCors(req, res);
+	};
+	auto preflight = [](const httplib::Request &, httplib::Response &res) {
+		res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+		res.set_header("Access-Control-Allow-Headers", "Authorization, Content-Type");
+		res.set_header("Access-Control-Max-Age", "600");
+		res.status = 204;
+	};
+	// 这台电脑是谁（不需要授权）：手机用它确认连上的是哪台电脑、证书是否已经信任
+	const json info = {{"id", certs.pcId},
+	                   {"name", options.pcName},
+	                   {"version", options.version},
+	                   {"https", options.httpsPort},
+	                   {"http", options.httpPort},
+	                   {"ips", options.lanIps}};
+	auto getInfo = [info](const httplib::Request &, httplib::Response &res) { jsonReply(res, info); };
+	// 局域网里看得到的其他电脑
+	Discovery *discovery = options.discovery;
+	auto getPeers = [info, discovery](const httplib::Request &, httplib::Response &res) {
+		json peers = json::array();
+		if (discovery)
+			for (auto &p : discovery->peers())
+				peers.push_back({{"id", p.id},
+				                 {"name", p.name},
+				                 {"ip", p.ip},
+				                 {"ips", p.ips},
+				                 {"https", p.httpsPort},
+				                 {"http", p.httpPort},
+				                 {"version", p.version}});
+		jsonReply(res, {{"self", info}, {"peers", peers}});
 	};
 
 	// 手机建立连接：要带配对时拿到的令牌；本机调试不需要
 	auto createSession = [&streamer, &devices](const httplib::Request &req, httplib::Response &res) {
-		std::string name;
+		std::string name, deviceId;
 		if (isLoopback(req))
 			name = "本机调试";
-		else if (!devices.verify(bearer(req), name)) {
+		else if (!devices.verify(bearer(req), req.remote_addr, name, &deviceId)) {
 			jsonReply(res, {{"error", "unauthorized"}}, 401);
 			return;
 		}
 		std::string id, sdp;
-		if (!streamer.createSession(name, id, sdp)) {
+		if (!streamer.createSession(name, deviceId, id, sdp)) {
 			jsonReply(res, {{"error", "创建连接失败"}}, 500);
 			return;
 		}
@@ -104,8 +163,8 @@ bool WebServer::start(const Options &options, const CertFiles &certs, Streamer &
 	auto pair = [&devices](const httplib::Request &req, httplib::Response &res) {
 		auto body = json::parse(req.body, nullptr, false);
 		std::string token;
-		if (body.is_discarded() ||
-		    !devices.pair(body.value("code", ""), body.value("name", ""), token)) {
+		if (body.is_discarded() || !devices.pair(body.value("code", ""), body.value("name", ""),
+		                                         body.value("phone", ""), req.remote_addr, token)) {
 			log("配对失败：{} 的配对码无效或已过期", req.remote_addr);
 			jsonReply(res, {{"error", "配对码无效或已过期"}}, 403);
 			return;
@@ -132,6 +191,9 @@ bool WebServer::start(const Options &options, const CertFiles &certs, Streamer &
 		res.set_header("Access-Control-Allow-Origin", "*");
 		res.status = 204;
 	});
+	https.Options(R"(/api/.*)", preflight);
+	https.Get("/api/info", getInfo);
+	https.Get("/api/peers", getPeers);
 	https.Post("/api/pair", pair);
 	https.Post("/api/session", createSession);
 	https.Post("/api/answer", acceptAnswer);
@@ -157,27 +219,41 @@ bool WebServer::start(const Options &options, const CertFiles &certs, Streamer &
 	});
 	const auto ips = options.lanIps;
 	const int httpPort = options.httpPort;
-	http.Get("/api/local/pair", [&devices, ips, httpPort](const httplib::Request &,
-	                                                        httplib::Response &res) {
+	const int httpsPortNum = options.httpsPort;
+	const std::string pcId = certs.pcId, pcName = options.pcName;
+	http.Get("/api/local/pair", [&devices, ips, httpPort, httpsPortNum, pcId,
+	                             pcName](const httplib::Request &, httplib::Response &res) {
 		int left = 0;
-		const std::string code = devices.pairCode(left);
+		std::string shortCode;
+		const std::string code = devices.pairCode(left, &shortCode);
 		json urls = json::array();
 		for (auto &ip : ips) {
-			std::string url = std::format("http://{}:{}/?pair={}", ip, httpPort, code);
+			// 相机扫：打开设置页；PocketDesk 页面里扫：读出地址、编号和配对码
+			std::string url = std::format("http://{}:{}/?pair={}&id={}&https={}", ip, httpPort, code,
+			                              pcId, httpsPortNum);
 			urls.push_back({{"ip", ip}, {"url", url}, {"svg", qrSvg(url)}});
 		}
 		jsonReply(res, {{"secondsLeft", left},
+		                {"shortCode", shortCode},
+		                {"pcName", pcName},
 		                {"lastPaired", devices.lastPaired()},
 		                {"urls", urls},
 		                {"devices", devices.list()}});
 	});
-	http.Post("/api/local/devices/remove", [&devices](const httplib::Request &req,
-	                                                  httplib::Response &res) {
+	http.Post("/api/local/devices/remove", [&devices, &streamer](const httplib::Request &req,
+	                                                             httplib::Response &res) {
 		auto body = json::parse(req.body, nullptr, false);
-		res.status = !body.is_discarded() && devices.remove(body.value("id", "")) ? 204 : 404;
+		const std::string id = body.is_discarded() ? "" : body.value("id", "");
+		const bool ok = devices.remove(id);
+		if (ok)
+			streamer.closeDevice(id);
+		res.status = ok ? 204 : 404;
 	});
 	// 本机调试入口：浏览器把 http://127.0.0.1 当作安全页面，不装证书也能测整条链路
 	http.set_mount_point("/app", options.webDir.string());
+	http.Get("/api/info", getInfo);
+	http.Get("/api/peers", getPeers);
+	http.Post("/api/pair", pair);
 	http.Post("/api/session", createSession);
 	http.Post("/api/answer", acceptAnswer);
 	http.set_pre_routing_handler([](const httplib::Request &req, httplib::Response &res) {

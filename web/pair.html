@@ -30,6 +30,9 @@
   ol { margin: 0; padding-left: 20px; }
   li { margin-bottom: 6px; }
   #paired { color: var(--ok); font-weight: 600; min-height: 1.5em; }
+  .code-box { text-align: center; margin: 18px 0 6px; }
+  .code-box .label { color: var(--muted); }
+  .code { font-size: 44px; font-weight: 700; letter-spacing: 0.18em; font-variant-numeric: tabular-nums; }
   #expires { color: var(--muted); font-size: 13px; }
   h2 { font-size: 16px; margin: 0 0 12px; }
   table { width: 100%; border-collapse: collapse; }
@@ -48,11 +51,16 @@
 
   <div class="card">
     <div class="qr-row" id="qrs"></div>
+    <div class="code-box">
+      <div class="label">或者在 PocketDesk 页面里点“添加电脑”，输入这台电脑（<span id="pc-name"></span>）的数字：</div>
+      <div id="short-code" class="code"></div>
+    </div>
     <p id="expires"></p>
     <p id="paired"></p>
     <ol>
       <li>第一次连接时，手机会提示下载并信任这台电脑的证书（每部手机只需一次）。</li>
-      <li>二维码只能用一次，10 分钟内有效；用过后这里会自动换一个新的。</li>
+      <li>二维码和数字只能用一次，10 分钟内有效；用过、过期或输错 5 次后会自动换新的。</li>
+      <li>授权一直有效，除非在下面“已授权的手机”里移除。</li>
       <li>有多个地址时，扫手机所在网络的那一个（通常是 192.168 开头的）。</li>
     </ol>
   </div>
@@ -84,6 +92,8 @@
       }
       if (!d.urls.length) box.textContent = '没有找到局域网地址，请检查网络连接。';
     }
+    document.getElementById('short-code').textContent = d.shortCode.slice(0, 3) + ' ' + d.shortCode.slice(3);
+    document.getElementById('pc-name').textContent = d.pcName;
     const m = Math.floor(d.secondsLeft / 60);
     document.getElementById('expires').textContent = `二维码还有 ${m} 分 ${d.secondsLeft % 60} 秒过期`;
     document.getElementById('paired').textContent = d.lastPaired ? `✓ 刚刚授权了：${d.lastPaired}` : '';
@@ -97,7 +107,8 @@
       const tr = document.createElement('tr');
       tr.innerHTML = '<td class="name"></td><td class="when"></td><td class="act"><button type="button">移除</button></td>';
       tr.querySelector('.name').textContent = dev.name;
-      tr.querySelector('.when').textContent = `最近使用 ${fmtTime(dev.lastSeen)}`;
+      tr.querySelector('.when').textContent = `最近使用 ${fmtTime(dev.lastSeen)}` +
+        (dev.ip ? ` · ${dev.ip}` : '') + (dev.browsers > 1 ? ` · ${dev.browsers} 个浏览器` : '');
       tr.querySelector('button').addEventListener('click', async () => {
         if (!confirm(`移除“${dev.name}”？它需要重新扫码才能连接。`)) return;
         await fetch('/api/local/devices/remove', { method: 'POST', body: JSON.stringify({ id: dev.id }) });
