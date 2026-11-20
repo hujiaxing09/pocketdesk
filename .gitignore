@@ -7,3 +7,6 @@ obj/
 *.key
 *.pfx
 *.log
+/build/
+/vcpkg_installed/
+CMakeUserPresets.json

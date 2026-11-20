@@ -1,0 +1,39 @@
+{
+  "name": "pocketdesk",
+  "version-string": "0.0.0",
+  "dependencies": [
+    "openssl",
+    {
+      "name": "cpp-httplib",
+      "default-features": false,
+      "features": [
+        "openssl"
+      ]
+    },
+    {
+      "name": "libdatachannel",
+      "default-features": false,
+      "features": [
+        "srtp"
+      ]
+    },
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "nvcodec",
+        "amf",
+        "qsv"
+      ]
+    },
+    "nlohmann-json"
+  ],
+  "builtin-baseline": "4b089e9116ef2715919c32dd6ca3ab98bc341eb8",
+  "overrides": [
+    {
+      "name": "ffnvcodec",
+      "version": "11.1.5.3"
+    }
+  ]
+}
