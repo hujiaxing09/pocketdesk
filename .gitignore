@@ -1,0 +1,9 @@
+/dist/
+/.local/
+/node_modules/
+bin/
+obj/
+*.pem
+*.key
+*.pfx
+*.log
