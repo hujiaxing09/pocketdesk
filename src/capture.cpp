@@ -254,6 +254,11 @@ bool Nv12Converter::init(ID3D11Device *device, ID3D11DeviceContext *context, int
 	}
 	mVideoContext->VideoProcessorSetStreamFrameFormat(vp, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
 	mVideoContext->VideoProcessorSetStreamAutoProcessingMode(vp, 0, FALSE);
+	// 编码器的纹理可能比画面大（Intel QSV 按 16 对齐，1080 变 1088），只画到左上角 outW×outH，
+	// 不然画面会被拉伸，编码器再裁掉多出来的部分
+	mOutRect = RECT{0, 0, outW, outH};
+	mVideoContext->VideoProcessorSetOutputTargetRect(vp, TRUE, &mOutRect);
+	mVideoContext->VideoProcessorSetStreamDestRect(vp, 0, TRUE, &mOutRect);
 	return true;
 }
 

@@ -35,7 +35,7 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 std::atomic<bool> gRunning{true};
-constexpr const char *kVersion = "0.4.3";
+constexpr const char *kVersion = "0.4.5";
 std::filesystem::path gDataDir; // 证书、授权记录、日志都放这里，启动时确定
 
 enum class Mode {
@@ -190,8 +190,8 @@ bool waitForPort(int port, int ms) {
 
 std::filesystem::path dataDir() { return gDataDir; }
 
-// 以前版本的数据位置
-std::filesystem::path legacyDataDir() {
+// 程序文件夹不可写时用的数据位置
+std::filesystem::path userDataDir() {
 	const wchar_t *local = _wgetenv(L"LOCALAPPDATA");
 	return std::filesystem::path(local ? local : L".") / L"PocketDesk";
 }
@@ -210,51 +210,20 @@ bool writable(const std::filesystem::path &dir) {
 	return true;
 }
 
-// 把 from 里的内容搬到 to（跨盘时先复制再删），成功后删掉 from
-bool moveTree(const std::filesystem::path &from, const std::filesystem::path &to, std::string &err) {
-	namespace fs = std::filesystem;
-	std::error_code ec;
-	fs::create_directories(to, ec);
-	for (auto &e : fs::directory_iterator(from, ec)) {
-		const auto dest = to / e.path().filename();
-		fs::rename(e.path(), dest, ec);
-		if (ec) {
-			ec.clear();
-			fs::copy(e.path(), dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-			if (ec) {
-				err = ec.message();
-				return false;
-			}
-		}
-	}
-	fs::remove_all(from, ec);
-	return true;
-}
-
 // 数据目录：优先放在程序旁边的 data 文件夹（删掉程序文件夹就删干净了）；
 // 程序文件夹不可写（例如装在 Program Files）时放到 %LOCALAPPDATA%\PocketDesk。
 // 返回给日志看的说明。
 std::string chooseDataDir(const Args &args) {
-	namespace fs = std::filesystem;
 	if (!args.dataDir.empty()) {
 		gDataDir = args.dataDir;
 		return "命令行指定";
 	}
 	const auto portable = exeDir() / L"data";
 	if (!writable(portable)) {
-		gDataDir = legacyDataDir();
+		gDataDir = userDataDir();
 		return "用户目录（程序文件夹不可写）";
 	}
 	gDataDir = portable;
-	// 第一次用新版本：把以前放在 %LOCALAPPDATA% 里的证书、授权记录和日志搬过来，手机不用重新授权
-	const auto old = legacyDataDir();
-	std::error_code ec;
-	if (fs::exists(old / L"certs", ec) && !fs::exists(portable / L"certs", ec)) {
-		std::string err;
-		if (moveTree(old, portable, err))
-			return "程序文件夹（已把 " + old.string() + " 里的旧数据搬过来）";
-		return "程序文件夹（搬旧数据失败：" + err + "）";
-	}
 	return "程序文件夹";
 }
 
@@ -346,6 +315,7 @@ void captureLoop(const Args &args, Streamer &streamer, InputInjector &input, Set
 	int lostCount = 0;
 	auto lastEncoderReopen = Clock::time_point{};
 	bool noDisplay = false; // 一个显示器都没有（没接显示器的主机、显示器关着）
+	int encoderFailures = 0; // 编码器连续打不开的次数
 
 	bool dirty = false;
 	int64_t framePresentQpc = 0;
@@ -477,9 +447,18 @@ void captureLoop(const Args &args, Streamer &streamer, InputInjector &input, Set
 			    !converter.init(capture.device(), capture.context(), capture.width, capture.height,
 			                    encW, encH)) {
 				encoder.close();
-				Sleep(2000);
+				// 告诉手机为什么没有画面（新手机连上时 stateDirty 会让它再收到一次）
+				if (encoderFailures == 0 || settings.stateDirty.exchange(false))
+					streamer.sendControl(
+					    json{{"type", "notice"}, {"reason", "encoder"}, {"encoder", cfg.name}}.dump());
+				++encoderFailures;
+				// 前几次 2 秒重试一次，之后 15 秒一次，避免日志刷屏
+				Sleep(encoderFailures < 5 ? 2000 : 15000);
 				continue;
 			}
+			if (encoderFailures)
+				log("编码器 {} 在失败 {} 次后打开了", cfg.name, encoderFailures);
+			encoderFailures = 0;
 			lastEncoderReopen = Clock::now();
 			encoderDevice = capture.device();
 			streamer.takeKeyframeRequest();
@@ -706,8 +685,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 		const std::string type = j.value("type", "");
 		if (type == "settings")
 			applySettings(settings, j);
-		else if (type == "debug")
-			log("[{}] 手机调试 {}", id, text);
 		else if (type == "clientStats")
 			onClientStats(settings, id, streamerPtr ? streamerPtr->deviceName(id) : "", j);
 	};

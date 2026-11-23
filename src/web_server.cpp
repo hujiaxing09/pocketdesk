@@ -249,11 +249,10 @@ bool WebServer::start(const Options &options, const CertFiles &certs, Streamer &
 			streamer.closeDevice(id);
 		res.status = ok ? 204 : 404;
 	});
-	// 本机调试入口：浏览器把 http://127.0.0.1 当作安全页面，不装证书也能测整条链路
+	// 本机调试入口：浏览器把 http://127.0.0.1 当作安全页面，不装证书也能测整条链路（本机请求不需要授权）
 	http.set_mount_point("/app", options.webDir.string());
 	http.Get("/api/info", getInfo);
 	http.Get("/api/peers", getPeers);
-	http.Post("/api/pair", pair);
 	http.Post("/api/session", createSession);
 	http.Post("/api/answer", acceptAnswer);
 	http.set_pre_routing_handler([](const httplib::Request &req, httplib::Response &res) {

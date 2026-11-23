@@ -13,7 +13,7 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(unofficial-nayuki-qr-code-generator CONFIG REQUIRED)
 
-# WIN32：托盘程序，没有控制台窗口；日志写到 %LOCALAPPDATA%\PocketDesk\logs
+# WIN32：托盘程序，没有控制台窗口；日志写到程序旁边的 data\logs
 add_executable(pocketdesk WIN32
     res/pocketdesk.rc
     src/main.cpp

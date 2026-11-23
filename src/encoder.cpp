@@ -5,10 +5,13 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
+#include <libavutil/hwcontext_qsv.h>
 #include <libavutil/opt.h>
 }
 
 #include <chrono>
+#include <cstdarg>
+#include <mutex>
 #include <thread>
 
 namespace pd {
@@ -17,6 +20,28 @@ static std::string avErr(int code) {
 	char buf[AV_ERROR_MAX_STRING_SIZE] = {};
 	av_strerror(code, buf, sizeof(buf));
 	return buf;
+}
+
+// FFmpeg 自己的警告和错误（比如“不支持这种像素格式”）默认打到 stderr，看不到；转进我们的日志
+static void ffmpegLog(void *avcl, int level, const char *fmt, va_list vl) {
+	if (level > AV_LOG_WARNING)
+		return;
+	char line[1024];
+	int prefix = 1;
+	av_log_format_line2(avcl, level, fmt, vl, line, sizeof(line), &prefix);
+	std::string s(line);
+	while (!s.empty() && (s.back() == '\n' || s.back() == '\r'))
+		s.pop_back();
+	if (!s.empty())
+		log("FFmpeg: {}", s);
+}
+
+static void hookFfmpegLog() {
+	static std::once_flag once;
+	std::call_once(once, [] {
+		av_log_set_level(AV_LOG_WARNING);
+		av_log_set_callback(ffmpegLog);
+	});
 }
 
 std::string encoderForVendor(UINT vendorId) {
@@ -39,6 +64,8 @@ bool VideoEncoder::open(ID3D11Device *device, const EncoderConfig &cfg) {
 	mCfg.width &= ~1;
 	mCfg.height &= ~1;
 
+	hookFfmpegLog();
+	const bool qsv = mCfg.name == "h264_qsv";
 	const AVCodec *codec = avcodec_find_encoder_by_name(mCfg.name.c_str());
 	if (!codec) {
 		log("FFmpeg 里没有编码器 {}", mCfg.name);
@@ -57,16 +84,38 @@ bool VideoEncoder::open(ID3D11Device *device, const EncoderConfig &cfg) {
 		return false;
 	}
 
-	mFramesRef = av_hwframe_ctx_alloc(mDeviceRef);
-	auto *frames = reinterpret_cast<AVHWFramesContext *>(mFramesRef->data);
-	frames->format = AV_PIX_FMT_D3D11;
-	frames->sw_format = AV_PIX_FMT_NV12;
-	frames->width = mCfg.width;
-	frames->height = mCfg.height;
-	// 0 = 按需单独建纹理；NV12 纹理数组 + RENDER_TARGET 在 NVIDIA 上会 E_INVALIDARG
-	frames->initial_pool_size = 0;
-	auto *d3dFrames = static_cast<AVD3D11VAFramesContext *>(frames->hwctx);
-	d3dFrames->BindFlags = D3D11_BIND_RENDER_TARGET; // 视频处理器要往里写
+	if (qsv) {
+		// Intel：从截屏用的 D3D11 设备派生 QSV 设备，帧池建在 QSV 设备上
+		ret = av_hwdevice_ctx_create_derived(&mQsvDeviceRef, AV_HWDEVICE_TYPE_QSV, mDeviceRef, 0);
+		if (ret < 0) {
+			log("从 D3D11 派生 QSV 设备失败: {}（显卡驱动可能太旧）", avErr(ret));
+			close();
+			return false;
+		}
+		mFramesRef = av_hwframe_ctx_alloc(mQsvDeviceRef);
+		auto *frames = reinterpret_cast<AVHWFramesContext *>(mFramesRef->data);
+		frames->format = AV_PIX_FMT_QSV;
+		frames->sw_format = AV_PIX_FMT_NV12;
+		frames->width = mCfg.width;
+		frames->height = mCfg.height;
+		// 只要 1 帧（同 Sunshine）：多帧时 FFmpeg 会建 NV12 纹理数组，带 RENDER_TARGET 的纹理数组
+		// 很多驱动不支持（Iris Xe 上实测 E_INVALIDARG）。编码是同步的，这一帧取一次、之后每帧重复使用
+		frames->initial_pool_size = 1;
+		auto *qsvFrames = static_cast<AVQSVFramesContext *>(frames->hwctx);
+		// 视频处理器要往里写：底下的 D3D11 纹理要带 RENDER_TARGET
+		qsvFrames->frame_type = MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET;
+	} else {
+		mFramesRef = av_hwframe_ctx_alloc(mDeviceRef);
+		auto *frames = reinterpret_cast<AVHWFramesContext *>(mFramesRef->data);
+		frames->format = AV_PIX_FMT_D3D11;
+		frames->sw_format = AV_PIX_FMT_NV12;
+		frames->width = mCfg.width;
+		frames->height = mCfg.height;
+		// 0 = 按需单独建纹理；NV12 纹理数组 + RENDER_TARGET 在 NVIDIA 上会 E_INVALIDARG
+		frames->initial_pool_size = 0;
+		auto *d3dFrames = static_cast<AVD3D11VAFramesContext *>(frames->hwctx);
+		d3dFrames->BindFlags = D3D11_BIND_RENDER_TARGET; // 视频处理器要往里写
+	}
 	ret = av_hwframe_ctx_init(mFramesRef);
 	if (ret < 0) {
 		log("av_hwframe_ctx_init 失败: {}", avErr(ret));
@@ -79,7 +128,7 @@ bool VideoEncoder::open(ID3D11Device *device, const EncoderConfig &cfg) {
 	mCtx->height = mCfg.height;
 	mCtx->time_base = {1, 90000};
 	mCtx->framerate = {mCfg.fps, 1};
-	mCtx->pix_fmt = AV_PIX_FMT_D3D11;
+	mCtx->pix_fmt = qsv ? AV_PIX_FMT_QSV : AV_PIX_FMT_D3D11;
 	mCtx->sw_pix_fmt = AV_PIX_FMT_NV12;
 	mCtx->hw_frames_ctx = av_buffer_ref(mFramesRef);
 	mCtx->gop_size = mCfg.fps * 60; // 平时靠手机的关键帧请求，一分钟兜底一次
@@ -157,17 +206,35 @@ void VideoEncoder::close() {
 	if (mPkt)
 		av_packet_free(&mPkt);
 	av_buffer_unref(&mFramesRef);
+	av_buffer_unref(&mQsvDeviceRef);
 	av_buffer_unref(&mDeviceRef);
 	mSps.clear();
 	mPps.clear();
 }
 
 bool VideoEncoder::beginFrame(ID3D11Texture2D **tex, UINT *slice) {
-	av_frame_unref(mFrame);
-	int ret = av_hwframe_get_buffer(mFramesRef, mFrame, 0);
+	// QSV 的帧池只有 1 帧：第一次取出来以后一直留着重复用（编码器只是加一个引用，同步编完就放开）
+	const bool reuse = mQsvDeviceRef && mFrame->buf[0];
+	if (!reuse)
+		av_frame_unref(mFrame);
+	int ret = reuse ? 0 : av_hwframe_get_buffer(mFramesRef, mFrame, 0);
 	if (ret < 0) {
 		log("av_hwframe_get_buffer 失败: {}", avErr(ret));
 		return false;
+	}
+	if (mFrame->format == AV_PIX_FMT_QSV) {
+		// QSV 帧：data[3] 是 mfxFrameSurface1，MemId 指向 (纹理, 下标)；
+		// 带 RENDER_TARGET 的纹理是单独的，下标记成 MFX_INFINITE，实际是 0
+		auto *surf = reinterpret_cast<mfxFrameSurface1 *>(mFrame->data[3]);
+		auto *pair = surf ? static_cast<mfxHDLPair *>(surf->Data.MemId) : nullptr;
+		if (!pair || !pair->first) {
+			log("QSV 帧里没有 D3D11 纹理");
+			return false;
+		}
+		*tex = static_cast<ID3D11Texture2D *>(pair->first);
+		const auto index = reinterpret_cast<uintptr_t>(pair->second);
+		*slice = index == uintptr_t(MFX_INFINITE) ? 0 : UINT(index);
+		return true;
 	}
 	*tex = reinterpret_cast<ID3D11Texture2D *>(mFrame->data[0]);
 	*slice = UINT(reinterpret_cast<intptr_t>(mFrame->data[1]));
@@ -184,7 +251,8 @@ bool VideoEncoder::endFrame(int64_t pts90k, bool forceKeyframe, const PacketFn &
 		mFrame->flags &= ~AV_FRAME_FLAG_KEY;
 	}
 	int ret = avcodec_send_frame(mCtx, mFrame);
-	av_frame_unref(mFrame);
+	if (!mQsvDeviceRef)
+		av_frame_unref(mFrame); // QSV 的那一帧留着下次用
 	if (ret < 0 && ret != AVERROR(EAGAIN)) {
 		log("avcodec_send_frame 失败: {}", avErr(ret));
 		return false;

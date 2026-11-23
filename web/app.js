@@ -54,9 +54,14 @@ async function deviceName() {
       const h = await navigator.userAgentData?.getHighEntropyValues(['model', 'platformVersion']);
       if (h?.model) return `${h.model}（Android ${(h.platformVersion || '').split('.')[0] || '?'}）`;
     } catch { /* 不支持就用 UA */ }
-    const m = ua.match(/Android (\d+)[^;]*;\s*([^;)]+)/);
-    if (m && m[2].trim() !== 'K') return `${m[2].trim()}（Android ${m[1]}）`;
-    return '安卓手机';
+    const inner = (ua.match(/\(([^)]*Android[^)]*)\)/) || [])[1] || '';
+    const parts = inner.split(';').map((p) => p.trim()).filter(Boolean);
+    const ver = ((parts.find((p) => /^Android \d+/.test(p)) || '').match(/\d+/) || ['?'])[0];
+    // 优先取带 “Build/” 的那段（型号 Build/版本号），否则跳过 Linux、U、wv、K、语言代码这类
+    const built = parts.find((p) => /\bBuild\//.test(p));
+    const model = built ? built.replace(/\s*Build\/.*$/, '').trim()
+      : parts.find((p) => !/^(Linux|U|wv|K|Android.*|[a-z]{2,3}([-_][A-Za-z]{2,4})?)$/i.test(p));
+    return model ? `${model}（Android ${ver}）` : `安卓手机（Android ${ver}）`;
   }
   return '浏览器';
 }
@@ -125,13 +130,6 @@ async function initRing() {
   if (originInfo) {
     const self = { id: originInfo.id, name: originInfo.name, https: originInfo.https, http: originInfo.http,
       addrs: [location.hostname, ...(originInfo.ips || [])].filter((a) => a !== '127.0.0.1') };
-    // 旧版本存的单个令牌（?k= 或 pd-token）归到这台电脑名下
-    let legacy = new URLSearchParams(location.search).get('k') || '';
-    try {
-      legacy ||= localStorage.getItem('pd-token') || '';
-      localStorage.removeItem('pd-token');
-    } catch { /* 忽略 */ }
-    if (legacy && !ring.pcs[self.id]?.token) self.token = legacy;
     // 本机调试入口（http://127.0.0.1）不需要授权，电脑对本机请求不检查令牌
     if (location.protocol === 'http:' && location.hostname === '127.0.0.1') self.token = 'local-debug';
     if (ring.pcs[self.id] || self.token) upsert(ring, self);
@@ -334,6 +332,10 @@ async function connect() {
           if (notice) { notice = ''; setStatus(''); }
         } else if (d.type === 'hello') {
           pcRemote = Boolean(d.remote);
+        } else if (d.type === 'notice' && d.reason === 'encoder') {
+          notice = d.reason;
+          setStatus(`这台电脑没能启动硬件视频编码（${d.encoder || '未知'}），所以没有画面。\n` +
+            '可以先更新这台电脑的显卡驱动再试；具体原因在电脑上 PocketDesk 的日志里。');
         } else if (d.type === 'notice' && d.reason === 'no-display') {
           notice = d.reason;
           setStatus('这台电脑现在没有可用的显示器，所以没有画面。\n' +

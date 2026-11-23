@@ -26,6 +26,8 @@ std::string encoderForVendor(UINT vendorId);
 
 // FFmpeg 硬件 H.264 编码，输入是同一 D3D11 设备上的 NV12 纹理。
 // 参数照 Sunshine：无 B 帧、CBR、约一帧大小的 VBV、按需 IDR。
+// NVIDIA、AMD 的编码器直接收 D3D11 纹理；Intel 的 h264_qsv 只收 QSV 帧，
+// 所以先从 D3D11 设备派生 QSV 设备，用 QSV 帧池，往每个 QSV 帧底下的 D3D11 纹理里画（同 Sunshine）。
 class VideoEncoder {
 public:
 	using PacketFn = std::function<void(const uint8_t *data, size_t size, bool keyframe)>;
@@ -48,7 +50,8 @@ private:
 	void handlePacket(const uint8_t *data, size_t size, const PacketFn &onPacket);
 
 	EncoderConfig mCfg;
-	AVBufferRef *mDeviceRef = nullptr;
+	AVBufferRef *mDeviceRef = nullptr;    // D3D11 设备（截屏用的那个）
+	AVBufferRef *mQsvDeviceRef = nullptr; // Intel：从 D3D11 设备派生的 QSV 设备
 	AVBufferRef *mFramesRef = nullptr;
 	AVCodecContext *mCtx = nullptr;
 	AVFrame *mFrame = nullptr;

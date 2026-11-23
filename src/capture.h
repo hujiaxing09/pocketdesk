@@ -85,6 +85,7 @@ private:
 	ComPtr<ID3D11VideoContext> mVideoContext;
 	ComPtr<ID3D11VideoProcessorEnumerator> mEnum;
 	ComPtr<ID3D11VideoProcessor> mProcessor;
+	RECT mOutRect{};
 	std::map<ID3D11Texture2D *, std::pair<ComPtr<ID3D11Texture2D>, ComPtr<ID3D11VideoProcessorInputView>>>
 	    mInputViews;
 	std::map<std::pair<ID3D11Texture2D *, UINT>,
