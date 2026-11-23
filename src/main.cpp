@@ -35,7 +35,7 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 std::atomic<bool> gRunning{true};
-constexpr const char *kVersion = "0.4.5";
+constexpr const char *kVersion = "1.0.0";
 std::filesystem::path gDataDir; // 证书、授权记录、日志都放这里，启动时确定
 
 enum class Mode {

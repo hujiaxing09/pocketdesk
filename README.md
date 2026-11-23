@@ -29,7 +29,7 @@
 
 ## 安装
 
-1. 获取安装包 `PocketDesk-<版本>-setup.exe`（可以按下面的[从源码构建](#从源码构建)自己打包）。
+1. 从 [Releases](https://github.com/hujiaxing09/pocketdesk/releases) 下载最新的安装包 `PocketDesk-<版本>-setup.exe`（也可以按下面的[从源码构建](#从源码构建)自己打包）。
 2. 在电脑上运行安装包，可以选择安装位置。安装后 PocketDesk 作为系统服务运行，开机自动启动，防火墙自动放行。
 3. 安装完成时会打开**配对页**，上面有二维码和 6 位数字。以后可以点右下角托盘里的 PocketDesk 图标，或者从开始菜单打开 PocketDesk 再次打开它。
 
