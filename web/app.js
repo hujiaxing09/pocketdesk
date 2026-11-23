@@ -1,8 +1,8 @@
 // PocketDesk 手机页面：WebRTC 收画面，触控/触控板/键盘发回电脑。
 import { Trackpad } from './trackpad.js';
 import { Keyboard } from './keyboard.js';
-import { loadRing, saveRing, ringFromUrl, upsert, baseOf, fetchTimeout, getInfo, probe, parsePairUrl, label,
-  ensurePhoneId } from './pcs.js';
+import { loadRing, saveRing, resetRing, ringFromUrl, upsert, baseOf, fetchTimeout, getInfo, probe, parsePairUrl,
+  label, ensurePhoneId } from './pcs.js';
 
 const $ = (id) => document.getElementById(id);
 const video = $('screen');
@@ -32,11 +32,10 @@ function savePrefs() {
   try { localStorage.setItem('pd-prefs', JSON.stringify(prefs)); } catch { /* 同上 */ }
 }
 
-// ---------------- 电脑和授权（钥匙串）----------------
+// ---------------- 电脑组和授权（钥匙串）----------------
 
 const ring = loadRing();
 let originInfo = null;            // 提供这个页面的那台电脑（可能已经关机，页面来自离线缓存）
-const discovered = new Map();     // 局域网里看到、但还没授权的电脑
 
 // iPad 的 Safari 默认伪装成 Mac，用触摸点数区分
 const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
@@ -66,8 +65,9 @@ async function deviceName() {
   return '浏览器';
 }
 
-const authorized = () => Object.values(ring.pcs).filter((p) => p.token);
-const currentPc = () => (ring.pcs[ring.current]?.token ? ring.pcs[ring.current] : null);
+const groupPcs = () => (ring.token ? Object.values(ring.pcs) : []);
+const currentPc = () => (ring.token && ring.pcs[ring.current]) || null;
+const authHeader = (token = ring.token) => ({ Authorization: `Bearer ${token}` });
 
 // 连这台电脑用的地址：页面所在的电脑直接用当前网址，不用跨域
 function baseFor(p) {
@@ -81,38 +81,36 @@ function sameSubnetFirst(ips) {
   return [...ips].sort((a, b) => (b.startsWith(`${here}.`) ? 1 : 0) - (a.startsWith(`${here}.`) ? 1 : 0));
 }
 
-// 把局域网发现的结果合并进来：已授权的更新地址，没授权的放进“发现的电脑”
-function mergePeers(data) {
-  const all = [data.self, ...(data.peers || []).map((p) => ({ ...p, ips: p.ips || [p.ip] }))];
-  for (const p of all) {
-    if (!p || !p.id) continue;
-    const ips = sameSubnetFirst(p.ips || []);
-    if (ring.pcs[p.id]) {
-      // 已经连得上的地址留在最前面，新知道的地址排在后面备用
-      const known = ring.pcs[p.id].addr;
-      upsert(ring, { id: p.id, name: p.name, https: p.https, http: p.http, addrs: ips });
-      if (known) upsert(ring, { id: p.id, addr: known });
-      discovered.delete(p.id);
-    } else {
-      discovered.set(p.id, { id: p.id, name: p.name, ip: ips[0], ips, https: p.https, http: p.http });
-    }
+// 电脑发来的组成员列表：已知的电脑更新地址，新加入组的电脑加进来，移出组的删掉
+function applyGroup(data) {
+  ring.group = data.group.id;
+  ring.groupName = data.group.name;
+  const ids = new Set();
+  for (const p of data.pcs) {
+    ids.add(p.id);
+    // 已经连得上的地址留在最前面，新知道的地址排在后面备用
+    const known = ring.pcs[p.id]?.addr;
+    upsert(ring, { id: p.id, name: p.name, https: p.https, http: p.http, addrs: sameSubnetFirst(p.ips || []), online: p.online });
+    if (known) upsert(ring, { id: p.id, addr: known });
   }
+  for (const id of Object.keys(ring.pcs)) if (!ids.has(id)) delete ring.pcs[id];
 }
 
-async function refreshPeers() {
-  // 先问页面所在的电脑和当前连着的电脑，问不到就挨个问其他已授权的电脑
+// 向组里任意一台电脑要最新的电脑列表：先问页面所在的电脑和当前电脑，问不到就挨个问
+async function refreshGroup() {
+  if (!ring.token) return;
   const order = [];
   if (originInfo) order.push(ring.pcs[originInfo.id] || { id: originInfo.id });
-  order.push(...[currentPc(), ...authorized()].filter(Boolean));
+  order.push(...[currentPc(), ...groupPcs()].filter(Boolean));
   const tried = new Set();
   for (const p of order) {
     if (tried.has(p.id)) continue;
     tried.add(p.id);
     if (p.id !== originInfo?.id && !(p.addrs || []).length) continue;
     try {
-      const res = await fetchTimeout(`${baseFor(p)}/api/peers`, {}, 2000);
-      if (!res.ok) continue;
-      mergePeers(await res.json());
+      const res = await fetchTimeout(`${baseFor(p)}/api/group`, { headers: authHeader() }, 2000);
+      if (!res.ok) continue; // 401：不是这个组的电脑（或者授权被移除了，连接时会发现）
+      applyGroup(await res.json());
       saveRing(ring);
       if (!sheet.hidden) renderPcs();
       return;
@@ -120,40 +118,63 @@ async function refreshPeers() {
   }
 }
 
+// 1.0.0 的钥匙串：每台电脑一个令牌。找到组里还认的那个，就是这部手机的组令牌
+async function migrateLegacy() {
+  for (const l of ring.legacy) {
+    const base = originInfo && l.id === originInfo.id ? location.origin : baseOf((l.addrs || [])[0], l.https);
+    try {
+      const res = await fetchTimeout(`${base}/api/group`, { headers: authHeader(l.token) }, 2000);
+      if (!res.ok) continue;
+      ring.token = l.token;
+      applyGroup(await res.json());
+      ring.legacy = [];
+      return;
+    } catch { /* 下一个 */ }
+  }
+}
+
+// 授权成功：令牌对整个组有效。在另一个组的电脑上授权，就换到那个组
+function adoptToken(result, pc) {
+  if (ring.group !== result.group.id) resetRing(ring, result.group, result.token);
+  else ring.token = result.token;
+  ring.legacy = [];
+  upsert(ring, pc);
+  ring.current = pc.id;
+}
+
 // 页面启动：整理钥匙串，确定要连哪台电脑
 async function initRing() {
+  ringFromUrl(ring);
   ensurePhoneId(ring, new URLSearchParams(location.search).get('p') || '');
-  for (const p of ringFromUrl()) {
-    if (!ring.pcs[p.id]?.token) upsert(ring, p);
-  }
   originInfo = await getInfo('', 2500);
+  const self = originInfo && { id: originInfo.id, name: originInfo.name, https: originInfo.https, http: originInfo.http,
+    addrs: [location.hostname, ...(originInfo.ips || [])].filter((a) => a !== '127.0.0.1'), online: true };
   if (originInfo) {
-    const self = { id: originInfo.id, name: originInfo.name, https: originInfo.https, http: originInfo.http,
-      addrs: [location.hostname, ...(originInfo.ips || [])].filter((a) => a !== '127.0.0.1') };
     // 本机调试入口（http://127.0.0.1）不需要授权，电脑对本机请求不检查令牌
-    if (location.protocol === 'http:' && location.hostname === '127.0.0.1') self.token = 'local-debug';
-    if (ring.pcs[self.id] || self.token) upsert(ring, self);
+    if (location.protocol === 'http:' && location.hostname === '127.0.0.1' && !ring.token) {
+      Object.assign(ring, { token: 'local-debug', group: originInfo.group });
+    }
+    if (ring.token && originInfo.group === ring.group) upsert(ring, self);
     // 相机扫码打开的：#pair=配对码
     const m = location.hash.match(/pair=([0-9a-f]+)/);
     if (m) {
       history.replaceState(null, '', location.pathname + location.search);
       setStatus('正在授权这部手机…');
-      const token = await requestPair(location.origin, m[1]);
-      if (token) {
-        upsert(ring, { ...self, token });
-        ring.current = self.id;
-      } else {
-        $('auth-detail').textContent = '二维码已过期或已被使用，请在电脑上重新打开二维码，或者输入 6 位数字。';
-      }
+      const r = await requestPair(location.origin, m[1]);
+      if (r) adoptToken(r, self);
+      else $('auth-detail').textContent = '二维码已过期或已被使用，请在电脑上重新打开二维码，或者输入 6 位数字。';
     }
   }
+  if (!ring.token) await migrateLegacy();
+  if (ring.token) await refreshGroup();
   if (!currentPc()) {
-    const byRecent = authorized().sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
-    ring.current = (originInfo && ring.pcs[originInfo.id]?.token) ? originInfo.id : (byRecent[0]?.id || '');
+    const byRecent = groupPcs().sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+    ring.current = (originInfo && ring.pcs[originInfo.id]) ? originInfo.id : (byRecent[0]?.id || '');
   }
   saveRing(ring);
 }
 
+// 用配对码换令牌：返回 { token, group }，失败返回 null
 async function requestPair(base, code) {
   try {
     const res = await fetchTimeout(`${base}/api/pair`, {
@@ -161,14 +182,14 @@ async function requestPair(base, code) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code, name: await deviceName(), phone: ring.phone }),
     }, 5000);
-    return res.ok ? (await res.json()).token : '';
+    return res.ok ? await res.json() : null;
   } catch {
-    return '';
+    return null;
   }
 }
 
 function switchTo(id) {
-  if (!ring.pcs[id]?.token) return;
+  if (!ring.token || !ring.pcs[id]) return;
   if (paused) {
     paused = false;
     $('paused').hidden = true;
@@ -181,12 +202,11 @@ function switchTo(id) {
   connect();
 }
 
-function showAuth(target, why) {
+function showAuth(why) {
   closePc();
   setStatus('');
-  $('auth-title').textContent = target ? `这部手机还没有在「${label(target)}」上授权` : '这部手机还没有授权';
   if (why !== undefined) $('auth-detail').textContent = why;
-  $('auth-others').hidden = authorized().length === 0;
+  $('auth-others').hidden = groupPcs().length === 0;
   authEl.hidden = false;
 }
 
@@ -248,7 +268,7 @@ function sendSettings() {
 }
 
 async function startSession(target, stale) {
-  const opts = { method: 'POST', headers: { Authorization: `Bearer ${target.token}` } };
+  const opts = { method: 'POST', headers: authHeader() };
   try {
     return await fetchTimeout(`${baseFor(target)}/api/session`, opts, 4000);
   } catch {
@@ -257,7 +277,7 @@ async function startSession(target, stale) {
     setStatus(`正在查找 ${label(target)}…`);
     if (!await probe(target)) {
       if (stale()) throw new Error('stale');
-      await refreshPeers();
+      await refreshGroup();
       if (stale()) throw new Error('stale');
       if (!await probe(target)) throw new Error(`找不到「${label(target)}」，确认它已开机并运行 PocketDesk`);
     }
@@ -287,7 +307,7 @@ async function connect() {
   const target = currentPc();
   try {
     if (!target) {
-      showAuth(originInfo);
+      showAuth();
       return;
     }
     authEl.hidden = true;
@@ -295,9 +315,9 @@ async function connect() {
     const res = await startSession(target, stale);
     if (stale()) return;
     if (res.status === 401) {
-      target.token = '';
+      ring.token = '';
       saveRing(ring);
-      showAuth(target, '电脑上已经移除了这部手机的授权，需要重新授权。');
+      showAuth('电脑上已经移除了这部手机的授权，需要重新授权。');
       return;
     }
     if (!res.ok) throw new Error(`电脑没能创建连接（${res.status}）`);
@@ -755,7 +775,7 @@ $('menu-button').addEventListener('click', () => {
   pcListExpanded = false;
   renderPcs();
   sheet.hidden = false;
-  refreshPeers();
+  refreshGroup();
 });
 $('sheet-close').addEventListener('click', () => { sheet.hidden = true; });
 sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.hidden = true; });
@@ -934,21 +954,18 @@ let pcListExpanded = false;
 function renderPcs() {
   const list = $('pc-list');
   list.innerHTML = '';
-  const mine = authorized().sort((a, b) => (b.id === ring.current) - (a.id === ring.current) ||
+  const pcs = groupPcs().sort((a, b) => (b.id === ring.current) - (a.id === ring.current) ||
+    (b.online !== false) - (a.online !== false) ||
     (b.lastUsed || 0) - (a.lastUsed || 0) || label(a).localeCompare(label(b), 'zh'));
-  const others = [...discovered.values()].filter((d) => !ring.pcs[d.id]?.token);
-  const total = mine.length + others.length;
-  let shown = 0;
-  const room = () => pcListExpanded || shown < PC_LIST_LIMIT;
-  for (const p of mine) {
-    if (!room()) break;
-    shown += 1;
+  const shown = pcListExpanded ? pcs : pcs.slice(0, PC_LIST_LIMIT);
+  for (const p of shown) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = `pc${p.id === ring.current ? ' on' : ''}`;
+    b.className = `pc${p.id === ring.current ? ' on' : ''}${p.online === false ? ' off' : ''}`;
     b.innerHTML = '<span class="name"></span><span class="addr"></span>';
     b.querySelector('.name').textContent = label(p);
-    b.querySelector('.addr').textContent = p.id === ring.current ? '当前' : (p.addr || (p.addrs || [])[0] || '');
+    b.querySelector('.addr').textContent = p.id === ring.current ? '当前'
+      : p.online === false ? '不在线' : (p.addr || (p.addrs || [])[0] || '');
     b.addEventListener('click', () => { if (p.id !== ring.current) switchTo(p.id); });
     // 改名：只改这部手机上显示的名字，电脑本身的名称和 IP 不变
     const r = document.createElement('span');
@@ -967,139 +984,83 @@ function renderPcs() {
       renderPcs();
     });
     b.appendChild(r);
-    if (p.id !== ring.current) {
-      // 不再用的电脑可以从手机上删掉（电脑那边的授权记录要在电脑的配对页里移除）
-      const x = document.createElement('span');
-      x.className = 'forget';
-      x.textContent = '✕';
-      x.setAttribute('role', 'button');
-      x.setAttribute('aria-label', `从列表删除 ${label(p)}`);
-      x.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (!confirm(`从手机的电脑列表里删除「${label(p)}」？以后要再输入数字才能连接它。`)) return;
-        delete ring.pcs[p.id];
-        saveRing(ring);
-        renderPcs();
-      });
-      b.appendChild(x);
-    }
     list.appendChild(b);
   }
-  for (const d of others) {
-    if (!room()) break;
-    shown += 1;
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'pc new';
-    b.innerHTML = '<span class="name"></span><span class="addr"></span>';
-    b.querySelector('.name').textContent = `＋ ${d.name}`;
-    b.querySelector('.addr').textContent = `${d.ip}  未授权`;
-    b.addEventListener('click', () => openAdd(d));
-    list.appendChild(b);
-  }
-  if (total > PC_LIST_LIMIT) {
+  if (pcs.length > PC_LIST_LIMIT) {
     const more = document.createElement('button');
     more.type = 'button';
     more.className = 'pc more';
-    more.textContent = pcListExpanded ? '收起' : `更多（还有 ${total - shown} 台）`;
+    more.textContent = pcListExpanded ? '收起' : `更多（还有 ${pcs.length - shown.length} 台）`;
     more.addEventListener('click', () => { pcListExpanded = !pcListExpanded; renderPcs(); });
     list.appendChild(more);
   }
 }
 
-// ---------------- 添加电脑：输入 6 位数字，或者扫电脑上的二维码 ----------------
+// ---------------- 授权：输入 6 位数字，或者扫电脑上的二维码 ----------------
 
 const addEl = $('add');
-let addTarget = null; // { id, name, ip, https, http }
+let addTarget = null; // 要授权的那台电脑 { id, name, ip, https, http, base }
 
-function addStep(step) {
-  for (const s of ['pick', 'trust', 'code']) $(`add-${s}`).hidden = s !== step;
-  $('add-error').textContent = '';
-}
-
-function openAdd(target) {
+// 输入页面所在电脑的数字；页面所在的电脑连不上时只能扫码
+function openCode() {
   sheet.hidden = true;
   authEl.hidden = true;
   addEl.hidden = false;
-  if (target) checkTarget(target);
-  else {
+  $('add-error').textContent = '';
+  $('add-digits').value = '';
+  if (!originInfo) {
     addTarget = null;
-    $('add-title').textContent = '添加电脑';
-    renderAddPick();
-    addStep('pick');
+    $('add-form').hidden = true;
+    $('add-text').textContent = '连不上打开这个页面的电脑。请用下面的按钮扫组里任意一台电脑上的二维码。';
+    return;
   }
+  addTarget = { id: originInfo.id, name: originInfo.name, ip: location.hostname, https: originInfo.https,
+    http: originInfo.http, ips: originInfo.ips || [], base: location.origin };
+  $('add-form').hidden = false;
+  $('add-text').textContent = `在 ${originInfo.name} 上点 PocketDesk 托盘图标，输入页面上显示的 6 位数字：`;
+  $('add-digits').focus();
 }
 
 function closeAdd() {
   addEl.hidden = true;
   stopScan();
-  if (!currentPc()) showAuth(originInfo);
-}
-
-function renderAddPick() {
-  const list = $('add-found');
-  list.innerHTML = '';
-  for (const d of discovered.values()) {
-    if (ring.pcs[d.id]?.token) continue;
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'pc new';
-    b.innerHTML = '<span class="name"></span><span class="addr"></span>';
-    b.querySelector('.name').textContent = d.name;
-    b.querySelector('.addr').textContent = d.ip;
-    b.addEventListener('click', () => checkTarget(d));
-    list.appendChild(b);
-  }
-  $('add-found-empty').hidden = list.children.length > 0;
-}
-
-// 先确认连得上（电脑开着、手机已信任它的证书），再输入数字
-async function checkTarget(t) {
-  addTarget = { https: 47443, http: 47080, ...t };
-  $('add-title').textContent = `添加 ${addTarget.name || addTarget.ip}`;
-  $('add-error').textContent = '正在连接…';
-  const base = originInfo && addTarget.id === originInfo.id ? location.origin : baseOf(addTarget.ip, addTarget.https);
-  const info = await getInfo(base, 3000);
-  if (!info) {
-    // 手机编号带到浏览器里，那边授权时电脑也能认出是同一部手机
-    $('add-setup').href = `http://${addTarget.ip}:${addTarget.http}/?p=${ring.phone}`;
-    addStep('trust');
-    return;
-  }
-  Object.assign(addTarget, { id: info.id, name: info.name, https: info.https, http: info.http, ips: info.ips || [], base });
-  $('add-title').textContent = `添加 ${info.name}`;
-  $('add-pc-name').textContent = info.name;
-  addStep('code');
-  if (addTarget.code) submitCode(addTarget.code);
-  else {
-    $('add-digits').value = '';
-    $('add-digits').focus();
-  }
+  if (!currentPc()) showAuth();
 }
 
 async function submitCode(code) {
   const t = addTarget;
   if (!t || !code) return;
   $('add-error').textContent = '正在授权…';
-  const token = await requestPair(t.base, code);
-  if (!token) {
+  const r = await requestPair(t.base, code);
+  if (!r) {
     $('add-error').textContent = '数字不对或已过期。请看电脑上最新显示的数字再输一次（输错 5 次会换新的）。';
     return;
   }
-  upsert(ring, { id: t.id, name: t.name, https: t.https, http: t.http, addrs: [t.ip, ...t.ips], token });
-  discovered.delete(t.id);
+  adoptToken(r, { id: t.id, name: t.name, https: t.https, http: t.http, addrs: [t.ip, ...t.ips], online: true });
   addEl.hidden = true;
   switchTo(t.id);
+  refreshGroup();
+}
+
+// 扫到电脑上的二维码：直接用里面的配对码向那台电脑授权
+async function pairScanned(q) {
+  openCode();
+  const base = originInfo && q.id === originInfo.id ? location.origin : baseOf(q.ip, q.https);
+  const info = await getInfo(base, 3000);
+  if (!info) {
+    addTarget = null;
+    $('add-form').hidden = true;
+    $('add-text').textContent = '';
+    $('add-error').textContent = `连不上 ${q.ip}：可能是这部手机还没有信任它的证书。` +
+      '请用手机相机扫那个二维码，在浏览器里按提示操作。';
+    return;
+  }
+  addTarget = { id: info.id, name: info.name, ip: q.ip, https: info.https, http: info.http, ips: info.ips || [], base };
+  submitCode(q.code);
 }
 
 $('add-cancel').addEventListener('click', closeAdd);
-$('add-manual').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const ip = $('add-ip').value.trim();
-  if (ip) checkTarget({ ip, name: ip });
-});
-$('add-retry').addEventListener('click', () => checkTarget(addTarget));
-$('add-code-form').addEventListener('submit', (e) => {
+$('add-form').addEventListener('submit', (e) => {
   e.preventDefault();
   submitCode($('add-digits').value.replace(/\D/g, ''));
 });
@@ -1108,9 +1069,7 @@ $('add-digits').addEventListener('input', (e) => {
   e.target.value = v;
   if (v.length === 6) submitCode(v);
 });
-$('pc-add').addEventListener('click', () => openAdd(null));
-$('auth-code').addEventListener('click', () => openAdd(originInfo ? { id: originInfo.id, name: originInfo.name,
-  ip: location.hostname, https: originInfo.https, http: originInfo.http } : null));
+$('auth-code').addEventListener('click', openCode);
 $('auth-others').addEventListener('click', () => {
   authEl.hidden = true;
   renderPcs();
@@ -1165,7 +1124,7 @@ async function startScan() {
       return;
     }
     stopScan();
-    checkTarget({ id: pair.id, name: pair.ip, ip: pair.ip, https: pair.https, http: pair.http, code: pair.code });
+    pairScanned(pair);
   }, 200);
 }
 
@@ -1180,7 +1139,7 @@ function stopScan() {
 }
 
 for (const id of ['add-scan', 'add-scan-2']) $(id).addEventListener('click', () => {
-  if (addEl.hidden) openAdd(null);
+  if (addEl.hidden) openCode();
   startScan();
 });
 $('scan-cancel').addEventListener('click', stopScan);
@@ -1199,6 +1158,5 @@ renderMode();
 (async () => {
   try { await initRing(); } catch { /* 钥匙串整理失败时按未授权处理 */ }
   connect();
-  refreshPeers();
-  setInterval(refreshPeers, 20000);
+  setInterval(refreshGroup, 20000);
 })();

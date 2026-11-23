@@ -19,7 +19,7 @@ add_executable(pocketdesk WIN32
     src/main.cpp
     src/cursor.cpp
     src/desktop.cpp
-    src/devices.cpp
+    src/group.cpp
     src/service.cpp
     src/discovery.cpp
     src/input.cpp

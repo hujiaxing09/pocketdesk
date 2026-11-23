@@ -41,26 +41,39 @@
   td.act { text-align: right; }
   button { font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
            background: transparent; color: var(--danger); cursor: pointer; }
-  .empty { color: var(--muted); }
+  button.go { color: var(--accent); }
+  button:disabled { color: var(--muted); cursor: default; }
+  .empty, .note { color: var(--muted); }
+  .note { font-size: 13px; margin: 12px 0 0; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 8px; }
+  .dot.on { background: var(--ok); }
+  .tag { color: var(--muted); font-size: 13px; margin-left: 6px; }
+  h3 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 20px 0 4px; }
+  .join { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .join input { width: 9em; font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--line);
+                background: var(--bg); color: var(--fg); letter-spacing: 0.1em; }
+  .err { color: var(--danger); font-size: 13px; }
+  #banner { background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; }
 </style>
 </head>
 <body>
 <main>
+  <div id="banner" hidden></div>
   <h1>手机连接</h1>
   <p class="sub">用手机相机扫描二维码（安卓也可以用浏览器或系统自带的扫一扫），在浏览器里按提示操作。手机需要和这台电脑在同一个局域网。</p>
 
   <div class="card">
     <div class="qr-row" id="qrs"></div>
     <div class="code-box">
-      <div class="label">或者在 PocketDesk 页面里点“添加电脑”，输入这台电脑（<span id="pc-name"></span>）的数字：</div>
+      <div class="label">或者在手机的 PocketDesk 页面里输入这台电脑（<span id="pc-name"></span>）的数字：</div>
       <div id="short-code" class="code"></div>
     </div>
     <p id="expires"></p>
     <p id="paired"></p>
     <ol>
-      <li>第一次连接时，手机会提示下载并信任这台电脑的证书（每部手机只需一次）。</li>
+      <li>第一次连接时，手机会提示下载并信任证书。同一个组的电脑共用证书，每部手机只需一次。</li>
+      <li>手机授权一次，组里每台电脑都能连，一直有效，除非在下面“已授权的手机”里移除。</li>
       <li>二维码和数字只能用一次，10 分钟内有效；用过、过期或输错 5 次后会自动换新的。</li>
-      <li>授权一直有效，除非在下面“已授权的手机”里移除。</li>
       <li>有多个地址时，扫手机所在网络的那一个（通常是 192.168 开头的）。</li>
     </ol>
   </div>
@@ -68,15 +81,132 @@
   <div class="card">
     <h2>已授权的手机</h2>
     <table><tbody id="devices"></tbody></table>
+    <p class="note">组里每台电脑共用这份名单，在任何一台上移除都会同时生效。</p>
+  </div>
+
+  <div class="card">
+    <h2 id="group-title">电脑组</h2>
+    <table><tbody id="members"></tbody></table>
+    <h3>局域网里的其他电脑</h3>
+    <table><tbody id="others"></tbody></table>
+    <p class="note">加入另一台电脑所在的组：点“加入”，输入那台电脑配对页上的 6 位数字。
+      加入后这台电脑改用那个组的证书和手机授权（原来的授权不再保留），会自动重启几秒钟。</p>
   </div>
 </main>
 <script>
   const fmtTime = (s) => s ? new Date(s * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+  const $ = (id) => document.getElementById(id);
   let lastKey = '';
+  let restarting = false;
+
+  function banner(text) {
+    $('banner').textContent = text || '';
+    $('banner').hidden = !text;
+  }
+
+  async function post(path, body) {
+    return fetch(path, { method: 'POST', body: JSON.stringify(body) });
+  }
+
+  // 电脑重启时页面先等一等，连上后自动刷新
+  function waitRestart(text) {
+    restarting = true;
+    banner(text);
+    const t = setInterval(async () => {
+      try {
+        const d = await (await fetch('/api/local/pair', { cache: 'no-store' })).json();
+        if (d.restarting) return;
+        clearInterval(t);
+        location.reload();
+      } catch { /* 还在重启 */ }
+    }, 1500);
+  }
+
+  function renderGroup(d) {
+    const g = d.group;
+    const alone = g.pcs.length <= 1;
+    $('group-title').textContent = alone ? '电脑组（只有这台电脑）' : `电脑组：${g.name}（${g.pcs.length} 台）`;
+    const tbody = $('members');
+    tbody.innerHTML = '';
+    for (const pc of g.pcs) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td class="name"><span class="dot"></span><span class="n"></span><span class="tag"></span></td>' +
+        '<td class="when"></td><td class="act"></td>';
+      tr.querySelector('.dot').classList.toggle('on', pc.online);
+      tr.querySelector('.n').textContent = pc.name;
+      tr.querySelector('.tag').textContent = pc.self ? '本机' : '';
+      tr.querySelector('.when').textContent = pc.online ? (pc.ips || [])[0] || '' : '不在线';
+      if (!alone) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = pc.self ? '退出组' : '移出';
+        b.addEventListener('click', async () => {
+          const q = pc.self
+            ? '让这台电脑退出组？之后它变成单独的一台，手机要重新授权、重新信任证书才能连它。'
+            : `把“${pc.name}”移出组？它会变成单独的一台，手机要重新授权才能连它。`;
+          if (!confirm(q)) return;
+          await post('/api/local/group/remove', { id: pc.id });
+          if (pc.self) waitRestart('正在退出组，PocketDesk 马上会重启…');
+          else refresh();
+        });
+        tr.querySelector('.act').appendChild(b);
+      }
+      tbody.appendChild(tr);
+    }
+
+    // 正在输入数字时不重画，免得输入框被清掉
+    const others = $('others');
+    if (others.contains(document.activeElement)) return;
+    others.innerHTML = '';
+    if (!d.others.length) others.innerHTML = '<tr><td class="empty">没有发现。确认那台电脑开着 PocketDesk、在同一个局域网。</td></tr>';
+    for (const o of d.others) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td class="name"><span class="n"></span><span class="tag"></span></td><td class="when"></td><td class="act"></td>';
+      tr.querySelector('.n').textContent = o.name;
+      tr.querySelector('.tag').textContent = o.groupName && o.groupName !== o.name ? `${o.groupName} 的组` : '';
+      tr.querySelector('.when').textContent = o.ip;
+      const act = tr.querySelector('.act');
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'go';
+      if (!o.group) {
+        b.textContent = '版本太旧';
+        b.disabled = true;
+      } else {
+        b.textContent = '加入';
+        b.addEventListener('click', () => {
+          act.innerHTML = '<form class="join"><input inputmode="numeric" maxlength="6" placeholder="6 位数字" autocomplete="off">' +
+            '<button class="go" type="submit">确定</button></form><div class="err"></div>';
+          const input = act.querySelector('input');
+          input.focus();
+          act.querySelector('form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const code = input.value.replace(/\D/g, '');
+            if (code.length !== 6) return;
+            act.querySelector('.err').textContent = '正在加入…';
+            const res = await post('/api/local/group/join', { ip: o.ip, https: o.https, code });
+            if (res.ok) {
+              input.blur();
+              waitRestart(`已加入 ${o.groupName || o.name} 的组，PocketDesk 正在重启…`);
+            } else {
+              act.querySelector('.err').textContent = (await res.json().catch(() => ({}))).error || '加入失败';
+            }
+          });
+        });
+      }
+      act.appendChild(b);
+      others.appendChild(tr);
+    }
+  }
 
   async function refresh() {
+    if (restarting) return;
     let d;
     try { d = await (await fetch('/api/local/pair', { cache: 'no-store' })).json(); } catch { return; }
+    if (d.restarting) {
+      waitRestart('组已经变了，PocketDesk 正在重启…');
+      return;
+    }
     const key = d.urls.map((u) => u.url).join('|');
     if (key !== lastKey) {
       lastKey = key;
@@ -116,6 +246,7 @@
       });
       tbody.appendChild(tr);
     }
+    renderGroup(d);
   }
   refresh();
   setInterval(refresh, 2000);

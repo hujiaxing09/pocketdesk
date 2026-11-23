@@ -208,14 +208,14 @@ bool ensureCertificates(const std::filesystem::path &dir, const std::string &hos
 	const auto caCertPath = dir / "ca.crt";
 	out.serverCert = dir / "server.crt";
 	out.serverKey = dir / "server.key";
-	out.caName = "PocketDesk CA (" + displayName + ")";
 	const std::string dnsName = validDnsLabel(host) ? host + ".local" : "";
 
 	KeyPtr caKey = readKey(caKeyPath);
 	CertPtr ca = readCert(caCertPath);
 	if (!caKey || !ca || X509_check_private_key(ca.get(), caKey.get()) != 1) {
-		log("生成新的根证书: {}", out.caName);
-		if (!makeCa(out.caName, caKey, ca))
+		const std::string caName = "PocketDesk CA (" + displayName + ")";
+		log("生成新的根证书: {}", caName);
+		if (!makeCa(caName, caKey, ca))
 			return false;
 		if (!writeKey(caKeyPath, caKey.get()) || !writeCert(caCertPath, ca.get())) {
 			log("根证书写入失败: {}", caCertPath.string());
@@ -240,12 +240,9 @@ bool ensureCertificates(const std::filesystem::path &dir, const std::string &hos
 	unsigned char *p = reinterpret_cast<unsigned char *>(out.caDer.data());
 	i2d_X509(ca.get(), &p);
 
-	unsigned char md[EVP_MAX_MD_SIZE];
-	unsigned int mdLen = 0;
-	EVP_Digest(out.caDer.data(), out.caDer.size(), md, &mdLen, EVP_sha256(), nullptr);
-	out.pcId.clear();
-	for (unsigned int i = 0; i < 8 && i < mdLen; ++i)
-		out.pcId += std::format("{:02x}", md[i]);
+	char cn[256] = {};
+	X509_NAME_get_text_by_NID(X509_get_subject_name(ca.get()), NID_commonName, cn, sizeof(cn));
+	out.caName = cn;
 	return true;
 }
 

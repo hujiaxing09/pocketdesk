@@ -2,6 +2,7 @@
 #include "certs.h"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -15,7 +16,7 @@ class SSLServer;
 namespace pd {
 
 class Streamer;
-class DeviceStore;
+class Group;
 class Discovery;
 
 // HTTPS：页面、配对和信令（Safari 只在 HTTPS 页面里允许 WebRTC）
@@ -27,15 +28,17 @@ public:
 		int httpsPort = 47443;
 		int httpPort = 47080;
 		std::vector<std::string> lanIps;
+		std::string pcId;
 		std::string pcName;
 		std::string version;
 		Discovery *discovery = nullptr;
+		// 马上和同组电脑同步一次（手机带着还没同步过来的令牌时用）
+		std::function<void()> syncNow;
 	};
 
 	WebServer();
 	~WebServer();
-	bool start(const Options &options, const CertFiles &certs, Streamer &streamer,
-	           DeviceStore &devices);
+	bool start(const Options &options, const CertFiles &certs, Streamer &streamer, Group &group);
 	void stop();
 
 private:

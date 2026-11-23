@@ -22,6 +22,16 @@ bool Discovery::start(const Self &self, uint16_t port) {
 	return true;
 }
 
+void Discovery::setGroup(const std::string &id, const std::string &name, const std::string &rev) {
+	std::lock_guard lock(mMutex);
+	if (mSelf.group == id && mSelf.groupName == name && mSelf.rev == rev)
+		return;
+	mSelf.group = id;
+	mSelf.groupName = name;
+	mSelf.rev = rev;
+	mAnnounceNow = true;
+}
+
 void Discovery::stop() {
 	mRunning = false;
 	if (mThread.joinable())
@@ -45,14 +55,21 @@ std::vector<Discovery::Peer> Discovery::peers() {
 }
 
 void Discovery::announce(uintptr_t sock, const char *toIp) {
-	const std::string msg = nlohmann::json{{"pd", "announce"},
-	                                       {"id", mSelf.id},
-	                                       {"name", mSelf.name},
-	                                       {"https", mSelf.httpsPort},
-	                                       {"http", mSelf.httpPort},
-	                                       {"ver", mSelf.version},
-	                                       {"ips", localLanIPv4()}}
-	                            .dump();
+	nlohmann::json j;
+	{
+		std::lock_guard lock(mMutex);
+		j = {{"pd", "announce"},
+		     {"id", mSelf.id},
+		     {"name", mSelf.name},
+		     {"https", mSelf.httpsPort},
+		     {"http", mSelf.httpPort},
+		     {"ver", mSelf.version},
+		     {"group", mSelf.group},
+		     {"gname", mSelf.groupName},
+		     {"rev", mSelf.rev}};
+	}
+	j["ips"] = localLanIPv4();
+	const std::string msg = j.dump();
 	sockaddr_in to{};
 	to.sin_family = AF_INET;
 	to.sin_port = htons(mPort);
@@ -84,7 +101,7 @@ void Discovery::run() {
 	char buf[2048];
 	while (mRunning) {
 		const auto now = std::chrono::steady_clock::now();
-		if (now - lastAnnounce >= kAnnounceEvery) {
+		if (now - lastAnnounce >= kAnnounceEvery || mAnnounceNow.exchange(false)) {
 			// 向每个网段的广播地址发；只发 255.255.255.255 的话 Windows 只走一块网卡
 			for (auto &i : lanInterfaces())
 				announce(s, i.broadcast.c_str());
@@ -103,24 +120,32 @@ void Discovery::run() {
 		int n = recvfrom(s, buf, sizeof(buf), 0, reinterpret_cast<sockaddr *>(&from), &fromLen);
 		if (n <= 0)
 			continue;
-		auto j = nlohmann::json::parse(std::string(buf, size_t(n)), nullptr, false);
-		if (j.is_discarded() || j.value("pd", "") != "announce")
-			continue;
+		// 广播谁都能发：字段类型不对时 value() 会抛异常，整条丢掉
 		Peer p;
-		p.id = j.value("id", "");
-		p.name = j.value("name", "");
-		p.version = j.value("ver", "");
-		p.httpsPort = j.value("https", 0);
-		p.httpPort = j.value("http", 0);
-		if (p.id.empty() || p.httpsPort <= 0 || (p.id == mSelf.id && p.httpsPort == mSelf.httpsPort))
+		try {
+			auto j = nlohmann::json::parse(std::string(buf, size_t(n)), nullptr, false);
+			if (j.is_discarded() || j.value("pd", "") != "announce")
+				continue;
+			p.id = j.value("id", "");
+			p.name = j.value("name", "");
+			p.version = j.value("ver", "");
+			p.httpsPort = j.value("https", 0);
+			p.httpPort = j.value("http", 0);
+			p.group = j.value("group", "");
+			p.groupName = j.value("gname", "");
+			p.rev = j.value("rev", "");
+			if (p.id.empty() || p.httpsPort <= 0 || (p.id == mSelf.id && p.httpsPort == mSelf.httpsPort))
+				continue;
+			char ip[INET_ADDRSTRLEN] = {};
+			inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
+			p.ip = ip;
+			p.ips.push_back(ip);
+			for (auto &a : j.value("ips", nlohmann::json::array()))
+				if (a.is_string() && a.get<std::string>() != p.ip)
+					p.ips.push_back(a.get<std::string>());
+		} catch (const std::exception &) {
 			continue;
-		char ip[INET_ADDRSTRLEN] = {};
-		inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
-		p.ip = ip;
-		p.ips.push_back(ip);
-		for (auto &a : j.value("ips", nlohmann::json::array()))
-			if (a.is_string() && a.get<std::string>() != p.ip)
-				p.ips.push_back(a.get<std::string>());
+		}
 		p.seen = now;
 		bool isNew;
 		{
@@ -133,7 +158,7 @@ void Discovery::run() {
 		if (isNew) {
 			log("发现局域网里的电脑 {}（{}:{}，编号 {}，地址 {} 个）", p.name, p.ip, p.httpsPort, p.id,
 			    p.ips.size());
-			announce(s, ip); // 马上回一声，对方不用等下一轮广播
+			announce(s, p.ip.c_str()); // 马上回一声，对方不用等下一轮广播
 		}
 	}
 	closesocket(s);

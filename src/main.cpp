@@ -3,8 +3,8 @@
 #include "certs.h"
 #include "cursor.h"
 #include "desktop.h"
-#include "devices.h"
 #include "discovery.h"
+#include "group.h"
 #include "encoder.h"
 #include "input.h"
 #include "log.h"
@@ -35,7 +35,7 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 std::atomic<bool> gRunning{true};
-constexpr const char *kVersion = "1.0.0";
+constexpr const char *kVersion = "1.1.0";
 std::filesystem::path gDataDir; // 证书、授权记录、日志都放这里，启动时确定
 
 enum class Mode {
@@ -658,13 +658,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	const auto host = hostName();
 	const auto ips = localLanIPv4();
 
-	CertFiles certs;
 	const std::string displayName = args.name.empty() ? host : args.name;
+	// 组决定用哪个根证书（加入、退出组时会换掉），所以先于证书准备
+	const std::string pcId = loadPcId(dataDir());
+	Group group(dataDir(), {pcId, displayName, args.httpsPort, args.httpPort, ips});
+	CertFiles certs;
 	if (!ensureCertificates(dataDir() / "certs", host, displayName, ips, certs)) {
 		log("证书准备失败");
 		return 1;
 	}
-	DeviceStore devices(dataDir() / "devices.json");
 	InputInjector input;
 	Settings settings;
 	settings.fps = args.fps;
@@ -710,14 +712,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	wo.httpsPort = args.httpsPort;
 	wo.httpPort = args.httpPort;
 	wo.lanIps = ips;
-	wo.pcName = args.name.empty() ? host : args.name;
+	wo.pcId = pcId;
+	wo.pcName = displayName;
 	wo.version = kVersion;
 
 	Discovery discovery;
-	discovery.start({certs.pcId, wo.pcName, kVersion, args.httpsPort, args.httpPort},
+	discovery.start({pcId, displayName, kVersion, args.httpsPort, args.httpPort, group.id(), group.name(),
+	                 group.rev()},
 	                uint16_t(args.discoveryPort));
 	wo.discovery = &discovery;
-	if (!web.start(wo, certs, streamer, devices)) {
+	// 和同组电脑同步一次：拉取版本不同的记录，断开被别的电脑移除的手机，记录变了就马上广播
+	auto syncGroup = [&](bool force) {
+		for (auto &id : group.sync(discovery.peers(), force))
+			streamer.closeDevice(id);
+		discovery.setGroup(group.id(), group.name(), group.rev());
+	};
+	wo.syncNow = [&] { syncGroup(true); };
+	if (!web.start(wo, certs, streamer, group)) {
 		// 服务启动的不弹窗（服务会过一会儿重试），看日志
 		if (!agent)
 			MessageBoxW(nullptr, L"PocketDesk 启动失败：端口被占用或证书无效，详见日志。", L"PocketDesk",
@@ -732,6 +743,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	std::thread worker([&] { captureLoop(args, streamer, input, settings); });
 
 	int exitCode = 0;
+	bool relaunch = false; // 不是由服务启动的：重启就是自己再启动一份
 	Tray tray;
 	Tray::Callbacks cb;
 	cb.onPair = [&] { openUrl(pairUrl); };
@@ -774,7 +786,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	if (!ips.empty())
 		tip += L" · " + widen(ips.front());
 	tray.setTooltip(tip);
-	if (devices.list().empty()) {
+	// 组同步；加入、退出组后根证书变了，重启一次
+	std::thread syncer([&] {
+		while (gRunning) {
+			syncGroup(false);
+			if (group.needRestart()) {
+				log("组变了，重启以使用新的证书");
+				if (agent)
+					exitCode = service::kExitRestart;
+				else
+					relaunch = true;
+				Sleep(500); // 让配对页先收到“正在重启”
+				tray.quit();
+				return;
+			}
+			for (int i = 0; i < 10 && gRunning; ++i)
+				Sleep(100);
+		}
+	});
+
+	if (group.phones().empty()) {
 		tray.notify(L"PocketDesk 已在后台运行", L"用手机相机扫描打开的二维码即可连接。");
 		openUrl(pairUrl);
 	} else if (!agent) {
@@ -802,6 +833,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	gRunning = false;
 	worker.join();
 	tipper.join();
+	syncer.join();
 	if (agentWatch.joinable())
 		agentWatch.join();
 	input.releaseAll();
@@ -810,6 +842,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 	timeEndPeriod(1);
 	ReleaseMutex(singleton);
 	CloseHandle(singleton);
+	if (relaunch) {
+		std::wstring cmd = GetCommandLineW();
+		STARTUPINFOW si{sizeof(si)};
+		PROCESS_INFORMATION pi{};
+		if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
+		} else {
+			log("重新启动失败: {}", GetLastError());
+		}
+	}
 	log("已退出（退出码 {}）", exitCode);
 	return exitCode;
 }

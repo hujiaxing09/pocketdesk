@@ -1,24 +1,43 @@
-// 手机端的“钥匙串”：记住每台电脑的编号、名字、地址和授权令牌。
-// 不管页面是从哪台电脑打开的，都用这一份去连任意一台电脑，所以没有“入口电脑”。
+// 手机端的“钥匙串”：所在的组、组令牌（组里每台电脑都认），以及组里电脑的缓存（编号、名字、地址）。
+// 电脑列表每次从电脑那里拿最新的；不管页面是从哪台电脑打开的，都用这一份去连组里任意一台。
 //
 // 存两处：
 //   localStorage：平时用。
-//   网址的 ?ring=：iPhone 主屏幕 App 和 Safari 存储不互通，但“添加到主屏幕”会保存完整网址，
-//                  图标就自带全部授权；万一 App 的数据被清，也能从网址恢复。
+//   网址的 ?k=：iPhone 主屏幕 App 和 Safari 存储不互通，但“添加到主屏幕”会保存完整网址，
+//               图标就自带授权；万一 App 的数据被清，也能从网址恢复。
 
 const KEY = 'pd-ring';
 
+// legacy：1.0.0 的钥匙串里每台电脑各有一个令牌，启动时挨个试，找出组里还认的那个
+function emptyRing() {
+  return { group: '', groupName: '', token: '', phone: '', current: '', pcs: {}, legacy: [] };
+}
+
 export function loadRing() {
+  const ring = emptyRing();
   try {
     const r = JSON.parse(localStorage.getItem(KEY) || 'null');
-    if (r && typeof r.pcs === 'object') return r;
+    if (r && typeof r === 'object') Object.assign(ring, r);
   } catch { /* 存储不可用或内容损坏 */ }
-  return { pcs: {}, current: '' };
+  if (!ring.pcs || typeof ring.pcs !== 'object') ring.pcs = {};
+  if (!Array.isArray(ring.legacy)) ring.legacy = [];
+  for (const p of Object.values(ring.pcs)) {
+    if (!p.token) continue;
+    ring.legacy.push({ id: p.id, addrs: p.addrs || [], https: p.https, token: p.token });
+    delete p.token;
+  }
+  return ring;
 }
 
 export function saveRing(ring) {
   try { localStorage.setItem(KEY, JSON.stringify(ring)); } catch { /* 同上 */ }
   writeRingToUrl(ring);
+}
+
+// 换到另一个组（在别的组的电脑上授权）：之前的电脑列表作废
+export function resetRing(ring, group, token) {
+  const phone = ring.phone;
+  Object.assign(ring, emptyRing(), { phone, group: group.id, groupName: group.name || '', token });
 }
 
 function b64url(s) {
@@ -35,21 +54,33 @@ function unb64url(s) {
   return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
 }
 
-export function encodeRing(ring) {
-  const list = Object.values(ring.pcs)
-    .filter((p) => p.token)
-    .map((p) => [p.id, p.name, p.addr || (p.addrs || [])[0] || '', p.https, p.token, p.alias || '']);
-  return list.length ? b64url(JSON.stringify(list)) : '';
+function encodeRing(ring) {
+  if (!ring.token) return '';
+  const pcs = Object.values(ring.pcs).map((p) => [p.id, p.name, p.addr || (p.addrs || [])[0] || '', p.https, p.alias || '']);
+  return b64url(JSON.stringify([ring.group, ring.token, pcs]));
 }
 
-export function decodeRing(text) {
+const addrsOf = (addr) => (addr ? [addr] : []);
+
+// 网址里带的钥匙串（主屏幕图标）。?ring= 是 1.0.0 的格式
+export function ringFromUrl(ring) {
+  const q = new URLSearchParams(location.search);
+  if (ring.token) return;
   try {
-    return JSON.parse(unb64url(text)).map(([id, name, addr, https, token, alias]) => ({
-      id, name, addr, addrs: addr ? [addr] : [], https, token, ...(alias ? { alias } : {}),
-    }));
-  } catch {
-    return [];
-  }
+    const k = q.get('k');
+    if (k) {
+      const [group, token, pcs] = JSON.parse(unb64url(k));
+      Object.assign(ring, { group, token });
+      for (const [id, name, addr, https, alias] of pcs) upsert(ring, { id, name, addrs: addrsOf(addr), https, ...(alias ? { alias } : {}) });
+    }
+    const old = q.get('ring');
+    if (old) {
+      for (const [id, name, addr, https, token, alias] of JSON.parse(unb64url(old))) {
+        ring.legacy.push({ id, addrs: addrsOf(addr), https, token });
+        upsert(ring, { id, name, addrs: addrsOf(addr), https, ...(alias ? { alias } : {}) });
+      }
+    }
+  } catch { /* 网址被改坏了 */ }
 }
 
 // 手机编号：第一次打开时随机生成，授权时发给电脑，用来认出“这还是同一部手机”。
@@ -66,18 +97,13 @@ function randomHex(bytes) {
   return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
 
-export function writeRingToUrl(ring) {
+function writeRingToUrl(ring) {
   const enc = encodeRing(ring);
   const params = [];
-  if (enc) params.push(`ring=${enc}`);
+  if (enc) params.push(`k=${enc}`);
   if (ring.phone) params.push(`p=${ring.phone}`);
   const url = params.length ? `${location.pathname}?${params.join('&')}` : location.pathname;
   if (location.pathname + location.search !== url) history.replaceState(null, '', url + location.hash);
-}
-
-export function ringFromUrl() {
-  const v = new URLSearchParams(location.search).get('ring');
-  return v ? decodeRing(v) : [];
 }
 
 // 手机上显示的名字：用户起的别名优先，否则用电脑自己的名字
