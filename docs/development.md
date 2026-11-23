@@ -1,14 +1,16 @@
-# 掌控 · PocketDesk（下一代）
+# PocketDesk 开发说明
+
+给开发者看的：设计决定、各阶段的做法和测试结果、踩过的坑、构建方法。使用说明见 [README](../README.md)。
 
 在局域网内，用手机浏览器查看并触控操作 Windows 电脑。不用装 App。
 
 这是 [hujiaxing09/pocketdesk](https://github.com/hujiaxing09/pocketdesk) 的重写版。旧版基于 Sunshine + MoonlightWeb，能用但太重。新版的目标是：每台电脑一个小程序，手机直接连接，不需要网关和电脑之间的 PIN 配对。旧版在新版达到同等可用之前继续保留。
 
-> 当前状态：阶段 0、1、2、3 已于 2026-11-20 用 iPhone 验收通过（阶段 2 在 zero、.53、.233 三台电脑上切换；阶段 3 的 0.4.3 安装包装在这三台上，锁屏、UAC、远程桌面都验证过）。
+> 当前状态：阶段 0、1、2、3 已验收通过。0.4.5 安装包装在 zero（NVIDIA）、.53、.233 和一台只有 Intel 核显的电脑上，iPhone 和安卓手机都能用；锁屏、UAC、远程桌面都验证过。
 
 ## 需求
 
-- 手机（主要是 iPhone Safari）和被控电脑在同一个局域网。
+- 手机（iPhone Safari，或安卓 Chrome/Edge）和被控电脑在同一个局域网。
 - 看到电脑桌面，用触控完成点击、双击、拖动、右键、滚轮，能打字（包括中文）。
 - 可以控制多台电脑，在页面上切换。
 - 画面要接近 Sunshine 的流畅度，所以**从一开始就用硬件 H.264**，不用截屏加 JPEG 的方案。
@@ -27,7 +29,7 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
   → WebRTC 视频轨（libdatachannel：RTP 打包，响应手机的重传请求 NACK 和关键帧请求 PLI）
 手机浏览器（Safari，页面必须是 HTTPS）
   → RTCPeerConnection 接收，<video> 硬件解码显示
-  触控手势 → WebRTC DataChannel JSON → 电脑上用 SendInput 注入鼠标、滚轮、键盘（中文用 KEYEVENTF_UNICODE）
+  触控 → WebRTC DataChannel JSON → 电脑上注入合成触摸（照 Sunshine），触控板模式和键盘用 SendInput（中文用 KEYEVENTF_UNICODE）
   信令：页面通过 HTTPS 请求和电脑交换 SDP
 ```
 
@@ -37,7 +39,7 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
 
 1. **开发语言：C++（MSVC）**。直接调用 D3D11 和 DXGI，与 Sunshine 一致，程序体积小。代价是 HTTPS、WebRTC、证书生成、托盘这些要靠引入库或者自己写。
 2. **HTTPS 证书：每台电脑各自生成根证书**。根证书带名称约束，只能签局域网 IP 和 `.local` 名称；电脑用它签自己的服务器证书，IP 变了就自动重签。手机给每台电脑装一次描述文件，再到"证书信任设置"里打开。各台电脑不共用根证书，因为共用就要在电脑之间传私钥，等于又加回了配对。iOS 对服务器证书的要求：有效期不超过 825 天、必须有 SAN、EKU 包含 serverAuth。
-3. **手机授权：每台电脑各自扫码**。每台电脑是独立的源，浏览器存的令牌不能跨电脑读取。授权一次多台共享需要页面同源（入口电脑）或者电脑之间配对，两者都不要。同一个二维码同时完成安装证书和授权。
+3. **手机授权：每台电脑各自扫码或输入 6 位数字**。授权一次多台共享需要电脑之间配对，不要；多台电脑的令牌由手机自己保存（阶段 2 的钥匙串）。授权永久有效，直到在电脑上移除。
 4. **许可证：GPL-3.0**。和旧仓库一致，可以直接使用 Sunshine（GPL-3.0）的代码。
 5. **HTTPS 服务：cpp-httplib + OpenSSL**。视频和输入都走 WebRTC，HTTPS 只需提供页面和交换 SDP，单头文件的 cpp-httplib 就够用，不需要 WebSocket，也不用编译 Boost。OpenSSL 同时负责生成带名称约束的根证书和服务器证书。没有选 Windows 自带的 http.sys + Schannel，因为它绑定证书和 URL 需要管理员权限。
 6. **构建：CMake + vcpkg 清单模式**。依赖写在 `vcpkg.json` 里，triplet 用 `x64-windows-static`（静态链接，安装后不依赖 VC++ 运行库）。用 VS 2026 自带的 CMake 和 vcpkg 即可，不需要另外安装。
@@ -48,7 +50,7 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
    - 代价：连接建立（ICE/DTLS/SRTP）复杂、难调试；播放缓冲由 Safari 决定，延迟没法自己压；Safari 上同样要 HTTPS（非安全页面不做 ICE），证书方案不变。
    - 比较过的另外两种：WebSocket + WebCodecs（最简单、延迟全由自己控制，但 Wi-Fi 丢包重传时会整体卡顿）；WebTransport（iOS 26.4 才支持，C++ 服务端没有成熟的库）。
    - 阶段 0 要测端到端延迟。如果 Safari 的播放缓冲让延迟太高，停下来商量；备选是用 DataChannel 传 H.264、页面里用 WebCodecs 自己解码。
-8. **硬件编码：FFmpeg（与 Sunshine 一致）**。用 FFmpeg 的 h264_nvenc / h264_qsv / h264_amf，截屏得到的 D3D11 纹理直接交给编码器，各家显卡的低延迟参数照搬 Sunshine。没有选 Media Foundation，因为各家显卡的 MF 编码器可调的低延迟选项少且不一致，Sunshine 的代码和参数也用不上。FFmpeg 只编译 avcodec 和这三个硬件编码器，不带 GPL 和 nonfree 组件。
+8. **硬件编码：FFmpeg（与 Sunshine 一致）**。用 FFmpeg 的 h264_nvenc / h264_qsv / h264_amf，截屏得到的 D3D11 纹理在显卡上转成 NV12 交给编码器（Intel 要先换成 QSV 帧，见“已知的坑”），各家显卡的低延迟参数照搬 Sunshine。没有选 Media Foundation，因为各家显卡的 MF 编码器可调的低延迟选项少且不一致，Sunshine 的代码和参数也用不上。FFmpeg 只编译 avcodec 和这三个硬件编码器，不带 GPL 和 nonfree 组件。
 
 ## 分阶段计划
 
@@ -57,7 +59,7 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
 | 阶段 | 内容 | 验收标准 |
 | --- | --- | --- |
 | 0 打通画面 | 截屏 → 硬件 H.264 → WebRTC → iPhone Safari 显示，先不做输入 | 在 .53 上用 iPhone 看到桌面，测出延迟、帧率、CPU/GPU 占用 |
-| 1 单机可用 | 触控输入（复用旧版手势层）、中文输入、光标、断线重连、高 DPI 和多显示器坐标、码率自适应、扫码授权、托盘程序、日志 | 在一台电脑上能完整替代旧版 |
+| 1 单机可用 | 触控输入（合成触摸）和触控板模式、中文输入、光标、断线重连、高 DPI 和多显示器坐标、码率自适应、扫码授权、托盘程序、日志 | 在一台电脑上能完整替代旧版 |
 | 2 多台电脑 | 局域网发现、主机切换、授权方案 | .53 和 .233 都能从同一个页面操作 |
 | 3 安装包 | 安装、卸载（可删除记录）、防火墙规则、开机启动；锁屏和 UAC 弹窗下也能操作（系统服务 + 会话内进程，原阶段 4 并入） | 安装和卸载都在干净的电脑上验证，锁屏时能看到并解锁 |
 
@@ -131,7 +133,6 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
 - **安装包**：Inno Setup 7（`installer/pocketdesk.iss`，`installer/build.ps1` 一步构建，输出 `dist/PocketDesk-<版本>-setup.exe`）。向导可以选安装位置，数据在安装位置下的 `data`。安装包只复制文件，其余由 `pocketdesk.exe --install` 做：注册并启动服务（自动启动，服务进程意外退出 5 秒后重启）、添加防火墙规则（按程序放行，所有网络类型）、收紧文件夹权限。升级前先停服务。
 - **权限**：程序以 SYSTEM 运行，普通用户如果能改程序文件夹，换掉 exe 就能拿到 SYSTEM 权限。所以安装时把程序文件夹设为只有 SYSTEM 和管理员能改；`data`（根证书私钥、授权记录）只有 SYSTEM 和管理员能读；`data\logs` 普通用户可以看。
 - **卸载**：`pocketdesk.exe --uninstall` 停止并删除服务、结束还在运行的 PocketDesk、删除防火墙规则；最后问是否删除 `data`（授权记录、证书和日志），选“是”就不留痕迹，选“否”则重装到同一位置后手机不用重新授权。静默卸载时保留。
-- **第一次安装时搬数据**：以前直接运行时放在 `%LOCALAPPDATA%\PocketDesk` 的数据会搬到安装位置的 `data`，这台电脑的编号和手机授权不变。
 - 不装也能用：直接运行 `pocketdesk.exe`（便携方式）和以前一样，只是锁屏时不能用。
 
 ## 已知的坑
@@ -143,6 +144,8 @@ Sunshine 是游戏串流服务器，MoonlightWeb 在电脑上跑一个 Moonlight
 - Safari 的 WebRTC 对 H.264 有要求：档次要在 SDP 里协商一致（profile-level-id）、packetization-mode=1、SPS/PPS 随每个关键帧下发。
 - NVENC 头文件（ffnvcodec）的版本决定最低 NVIDIA 驱动版本。vcpkg 默认的 13.1 要求 610 以上的驱动，在 API 13.0 的驱动上直接打不开编码器，所以 `vcpkg.json` 里固定为 11.1.5.3（驱动 471.41 以上）。
 - NVIDIA 上 FFmpeg 建 NV12 纹理数组并带 RENDER_TARGET 会报 `E_INVALIDARG`，编码纹理池改为每帧单独一张纹理。
+- Intel 的 `h264_qsv` 只收 NV12 或 QSV 帧，直接给 D3D11 纹理会报 “Invalid argument”（NVIDIA、AMD 的编码器收 D3D11 纹理）。做法同 Sunshine：从截屏用的 D3D11 设备派生 QSV 设备，在它上面建只有 1 帧的 QSV 帧池（`MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET`，底下的 D3D11 纹理带 RENDER_TARGET），取一次后每帧重复使用，从 `mfxHDLPair` 取出纹理画进去。帧池多于 1 帧时 FFmpeg 会建 NV12 纹理数组，带 RENDER_TARGET 的纹理数组很多驱动不支持（Iris Xe 上 `Could not create the texture (80070057)`）。QSV 的纹理按 16 对齐（1080 变 1088），视频处理器要设输出区域，只画左上角，否则画面被拉伸。不需要独立显卡，Intel 核显（Iris Xe、UHD）就有硬件编码。
+- FFmpeg 自己的警告和错误默认打到 stderr，程序没有控制台时看不到，已经转进日志（`FFmpeg: ...`）。编码器打不开时手机会提示原因，不再是无声的黑屏。
 - iPhone 横屏全屏时，屏幕最上沿约 20 点被 iOS 留给下拉通知中心，触摸不会交给网页（原生 App 可以让系统手势让路，网页不行）。横屏时画面整体下移 24 点，桌面顶部的标签页和窗口按钮才点得到。
 - Safari 遇到不受信任的证书时可以点“访问此网站”临时放行，之后网页和 WebRTC 都能用，看起来和装了证书一样。但这种例外不保证长期有效，跨电脑切换时也不一定生效，两种方式都支持，不强制安装证书：设置页同时给出“直接打开（点访问此网站）”和“安装证书（更稳定）”，已经能连上时也不自动跳走。
 - iPhone 从主屏幕打开的网页 App 和 Safari 存储不互通。授权令牌同时放在网址的 `?k=` 里，“添加到主屏幕”会保存完整网址，主屏幕图标就自带授权。
@@ -171,7 +174,7 @@ cmake --build --preset release
 - `https://<电脑IP>:47443/`：画面。点屏幕显示或隐藏统计（帧率、码率、延迟估算、丢包）。
 
 端口：TCP 47443（HTTPS）、47080（HTTP），UDP 47500–47599（WebRTC）、47100（局域网发现）。第一次运行时 Windows 防火墙会弹窗，要勾选电脑当前所在的网络类型（网络被设成“公用网络”时必须勾选“公用网络”，否则手机连不上）。
-**数据位置**：证书、手机授权记录和日志都放在程序旁边的 `data` 文件夹（例如程序在 `D:\App\pocketdesk`，数据就在 `D:\App\pocketdesk\data`），系统里不留别的文件。程序文件夹不可写时（例如装在 `C:\Program Files`）才放到 `%LOCALAPPDATA%\PocketDesk`。以前版本放在 `%LOCALAPPDATA%\PocketDesk` 的数据，第一次运行新版时会自动搬过来并删掉旧位置。
+**数据位置**：证书、手机授权记录和日志都放在程序旁边的 `data` 文件夹（例如程序在 `D:\App\pocketdesk`，数据就在 `D:\App\pocketdesk\data`），系统里不留别的文件。直接运行时程序文件夹不可写（例如放在 `C:\Program Files` 又没有安装）才放到 `%LOCALAPPDATA%\PocketDesk`。
 
 - 更新：只覆盖 `pocketdesk.exe` 和 `web` 文件夹，保留 `data`。删掉 `data` 会生成新的根证书，手机要重新信任、重新授权。
 - 卸载：用安装包装的，在“设置 → 应用”里卸载 PocketDesk，会删除服务和防火墙规则，并询问是否删除 `data`。直接运行的（便携方式），删掉整个程序文件夹即可，唯一留在系统里的是 Windows 防火墙第一次运行时为 `pocketdesk.exe` 建的放行规则，可以在“Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙”里删除。
@@ -180,15 +183,6 @@ cmake --build --preset release
 常用参数：`--list`（列出显示器）、`--name 显示名`、`--data 数据目录`、`--output N`、`--encoder h264_nvenc|h264_amf|h264_qsv`、`--fps 60`、`--bitrate 12000`（kbps）、`--web DIR`（直接用源码里的 web 目录，改网页不用重新编译）。
 
 本机调试：`http://127.0.0.1:47080/app/` 只允许本机访问，浏览器把 127.0.0.1 当作安全页面，不装证书也能测整条链路。
-
-## 从旧仓库复用
-
-旧仓库提交 `3594378` 中，这些文件不依赖 MoonlightWeb，可以直接拿来：
-
-- `web/gestures.js`：触控手势（点击、双击、拖动、长按右键、双指滚动和平移、三指键盘）
-- `web/keyboard.js`：手机键盘输入
-- `test/gestures.test.js`：手势测试
-- `web/icon.ico`、`web/icon-256.png`：图标
 
 ## 工作方式
 
