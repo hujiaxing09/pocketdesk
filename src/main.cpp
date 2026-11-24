@@ -702,9 +702,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 			return;
 		}
 		const std::string type = j.value("type", "");
-		if (type == "settings")
+		if (type == "settings") {
 			applySettings(settings, j);
-		else if (type == "clientStats")
+			if (j.contains("video") && j["video"].is_boolean() && streamerPtr)
+				streamerPtr->setVideoWanted(id, j["video"].get<bool>());
+		} else if (type == "clientStats")
 			onClientStats(settings, id, streamerPtr ? streamerPtr->deviceName(id) : "", j);
 	};
 	so.onControlOpen = [&](const std::string &id) {
@@ -712,8 +714,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 		// 告诉手机这份程序是不是在远程桌面会话里：远程桌面窗口最小化时 Windows 会停止绘制这个会话，
 		// 画面全黑，手机据此提示原因
 		if (streamerPtr)
-			streamerPtr->sendControlTo(
-			    id, json{{"type", "hello"}, {"remote", GetSystemMetrics(SM_REMOTESESSION) != 0}}.dump());
+			streamerPtr->sendControlTo(id, json{{"type", "hello"},
+			                                    {"remote", GetSystemMetrics(SM_REMOTESESSION) != 0},
+			                                    {"screenWidth", GetSystemMetrics(SM_CXSCREEN)}}
+			                                   .dump());
 	};
 	so.onClosed = [&](const std::string &id) {
 		input.releaseAll();

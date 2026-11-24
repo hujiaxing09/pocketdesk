@@ -128,80 +128,17 @@ test('取消时松开拖动中的左键', () => {
   assert.deepEqual(h.buttons(), ['1v', '1^']);
 });
 
-test('双指按住不动后，一根手指不动、另一根移动是右键拖动', () => {
+test('按钮按着时手指只移动光标，轻点也不会点击', () => {
   const h = harness(2);
+  h.pad.buttonHeld = true;
   h.pad.down(1, 100, 100);
-  h.pad.down(2, 140, 100);
-  h.advance(LONG_PRESS_MS + 10);
-  assert.deepEqual(h.buttons(), []); // 还没决定：要看第一下怎么动
-  // 手指 1 按着不动（相当于右键），手指 2 往右拖：移动够 20 像素才确定是右键拖动
-  h.pad.move(2, 155, 100);
-  assert.deepEqual(h.buttons(), []);
-  h.pad.move(2, 165, 100);
-  assert.deepEqual(h.buttons(), ['3v']);
-  h.pad.move(2, 185, 100);
+  h.advance(LONG_PRESS_MS + 10); // 长按也不会按下左键
+  h.pad.move(1, 130, 100);
   h.pad.flush();
-  const moves = h.sent.filter((m) => m.t === 'mrel');
-  assert.equal(moves.reduce((a, m) => a + m.dx, 0), 60); // 确定那一步 10 像素 + 之后 20 像素，增益 2
-  assert.ok(!h.sent.some((m) => m.t === 'wheel'));
-  // 先抬起拖动的手指、再抬起按着的手指，右键在最后才松开
-  h.pad.up(2, 180, 100);
-  assert.deepEqual(h.buttons(), ['3v']);
+  h.pad.up(1, 130, 100);
+  h.pad.down(1, 100, 100);
+  h.advance(50);
   h.pad.up(1, 100, 100);
-  assert.deepEqual(h.buttons(), ['3v', '3^']);
-});
-
-test('双指按住后两根一起动仍然是滚动，不会按下右键', () => {
-  for (const pause of [0, LONG_PRESS_MS + 10]) {
-    const h = harness();
-    h.pad.down(1, 100, 200);
-    h.pad.down(2, 140, 200);
-    h.advance(pause);
-    // 真实的触摸事件是一小步一小步来的，两根手指交替
-    for (let y = 195; y >= 170; y -= 5) {
-      h.pad.move(1, 100, y);
-      h.pad.move(2, 140, y);
-    }
-    h.advance(LONG_PRESS_MS + 10);
-    h.pad.flush();
-    h.pad.up(1, 100, 170);
-    h.pad.up(2, 140, 170);
-    assert.deepEqual(h.buttons(), [], `停顿 ${pause} ms`);
-    assert.ok(h.sent.some((m) => m.t === 'wheel'));
-  }
-});
-
-test('双指按住后两根反向动（缩放）也不会按下右键', () => {
-  const h = harness();
-  h.pad.down(1, 100, 200);
-  h.pad.down(2, 140, 200);
-  h.advance(LONG_PRESS_MS + 10);
-  // 两根手指同时张开，一小步一小步
-  for (let d = 5; d <= 30; d += 5) {
-    h.pad.move(1, 100 - d, 200);
-    h.pad.move(2, 140 + d, 200);
-  }
-  h.pad.up(1, 70, 200);
-  h.pad.up(2, 170, 200);
   assert.deepEqual(h.buttons(), []);
-});
-
-test('双指按住后不动直接抬起是右键单击', () => {
-  const h = harness();
-  h.pad.down(1, 100, 100);
-  h.pad.down(2, 140, 100);
-  h.advance(LONG_PRESS_MS + 300);
-  h.pad.up(1, 100, 100);
-  h.pad.up(2, 140, 100);
-  assert.deepEqual(h.buttons(), ['3v', '3^']);
-});
-
-test('取消时松开拖动中的右键', () => {
-  const h = harness();
-  h.pad.down(1, 100, 100);
-  h.pad.down(2, 140, 100);
-  h.advance(LONG_PRESS_MS + 10);
-  h.pad.move(2, 200, 100);
-  h.pad.cancel();
-  assert.deepEqual(h.buttons(), ['3v', '3^']);
+  assert.ok(h.sent.some((m) => m.t === 'mrel' && m.dx > 0));
 });

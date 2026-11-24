@@ -222,6 +222,7 @@ let serverStats = null;
 let serverState = null;
 let notice = ''; // 电脑发来的提示（例如没有显示器），收到画面状态后清掉
 let pcRemote = false; // 这台电脑的 PocketDesk 在远程桌面会话里运行
+let pcScreenWidth = 0; // 电脑主显示器的宽度（不显示画面时用来算触控板速度）
 
 function setStatus(text) { statusEl.textContent = text || ''; }
 
@@ -264,7 +265,8 @@ function waitIceGathering(p, ms) {
 function outputFor(id) { return (prefs.outputs || {})[id] ?? -1; }
 
 function sendSettings() {
-  send({ type: 'settings', bitrate: prefs.bitrate, scale: prefs.scale, fps: prefs.fps, output: outputFor(ring.current) });
+  send({ type: 'settings', bitrate: prefs.bitrate, scale: prefs.scale, fps: prefs.fps, output: outputFor(ring.current),
+    video: videoWanted() });
 }
 
 async function startSession(target, stale) {
@@ -352,6 +354,7 @@ async function connect() {
           if (notice) { notice = ''; setStatus(''); }
         } else if (d.type === 'hello') {
           pcRemote = Boolean(d.remote);
+          pcScreenWidth = Number(d.screenWidth) || 0;
         } else if (d.type === 'notice' && d.reason === 'encoder') {
           notice = d.reason;
           setStatus(`这台电脑没能启动硬件视频编码（${d.encoder || '未知'}），所以没有画面。\n` +
@@ -418,13 +421,12 @@ function currentOutput() {
   return serverState.outputs.find((o) => o.index === serverState.output) || null;
 }
 
-// 触控板：手指移动 1 个 CSS 像素，光标移动多少个桌面像素
+// 触控板：手指移动 1 个 CSS 像素，光标移动多少个桌面像素（手指划过整个画面 = 光标走过整个屏幕）
 function trackpadGain() {
-  const rect = contentRect();
-  const out = currentOutput();
-  const desktopWidth = out ? out.width : video.videoWidth;
-  if (!rect || !desktopWidth) return prefs.sensitivity;
-  return (desktopWidth / rect.width) * prefs.sensitivity;
+  const rect = videoWanted() ? contentRect() : null;
+  const desktopWidth = currentOutput()?.width || pcScreenWidth || video.videoWidth || 1920;
+  const padWidth = rect ? rect.width : stage.clientWidth || innerWidth;
+  return (desktopWidth / padWidth) * prefs.sensitivity;
 }
 
 // ---------------- 输入 ----------------
@@ -437,7 +439,10 @@ const keyboard = new Keyboard({
   input: $('kb-input'),
   bar: $('keybar'),
   send,
-  onChange: (open) => $('kb-button').classList.toggle('on', open),
+  onChange: (open) => {
+    $('kb-button').classList.toggle('on', open);
+    document.body.classList.toggle('kb-open', open);
+  },
 });
 
 // 触控模式：手指原样交给 Windows（坐标是画面上的 0..1 比例）
@@ -462,10 +467,9 @@ function onTouch(e) {
   lastActivity = Date.now();
   if (!canInput()) return;
   if (video.paused) video.play().catch(() => {});
-  const rect = contentRect();
-  if (!rect) return;
   const kind = e.type;
 
+  // 触控板只看手指的相对移动，不需要画面
   if (prefs.mode === 'trackpad') {
     for (const t of e.changedTouches) {
       if (kind === 'touchstart') trackpad.down(t.identifier, t.clientX, t.clientY);
@@ -476,6 +480,8 @@ function onTouch(e) {
     return;
   }
 
+  const rect = contentRect();
+  if (!rect) return;
   const pts = [];
   for (const t of e.changedTouches) {
     const id = t.identifier;
@@ -517,7 +523,7 @@ requestAnimationFrame(frame);
 
 // 有手指按着或按键按着时发心跳；电脑 1.5 秒收不到消息会自动松开
 setInterval(() => {
-  if (touchIds.size || trackpad.active || trackpad.holding) send({ t: 'hb' });
+  if (touchIds.size || trackpad.active || trackpad.holding || heldButtons.size) send({ t: 'hb' });
 }, 400);
 
 function releaseInput() {
@@ -527,6 +533,7 @@ function releaseInput() {
   }
   pendingMoves.clear();
   trackpad.cancel();
+  for (const id of [...heldButtons.keys()]) releaseButton(id);
 }
 
 window.addEventListener('blur', releaseInput);
@@ -539,6 +546,72 @@ document.addEventListener('visibilitychange', () => {
     lastActivity = Date.now();
     if (!paused) connect();
   }
+});
+
+// ---------------- 触控板模式：左右键，只当触控板用 ----------------
+// 用触控板模式时通常看的是电脑自己的屏幕，手机上默认不显示画面，电脑也就不截屏不编码（菜单里可以打开）
+
+const videoWanted = () => prefs.mode !== 'trackpad' || Boolean(prefs.padVideo);
+
+function renderPad() {
+  const pad = prefs.mode === 'trackpad';
+  document.body.classList.toggle('pad-only', pad && !prefs.padVideo);
+  $('pad-hint').hidden = !pad || Boolean(prefs.padVideo);
+  $('pad-buttons').hidden = !pad;
+  $('pad-video').checked = Boolean(prefs.padVideo);
+}
+
+// 轻微的按下反馈：安卓用振动；iPhone 不支持振动接口，但 iOS 18 起点一下开关样式的复选框会有触感
+function haptic() {
+  if (navigator.vibrate) {
+    navigator.vibrate(8);
+    return;
+  }
+  try {
+    const label = document.createElement('label');
+    label.style.display = 'none';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.setAttribute('switch', '');
+    label.appendChild(input);
+    document.body.appendChild(label);
+    label.click();
+    label.remove();
+  } catch { /* 没有就算了 */ }
+}
+
+const heldButtons = new Map(); // 按着按钮的手指（pointerId）→ 按钮
+
+function releaseButton(pointerId) {
+  const b = heldButtons.get(pointerId);
+  if (!b) return;
+  heldButtons.delete(pointerId);
+  b.classList.remove('down');
+  send({ t: 'btn', b: Number(b.dataset.b), d: false });
+  trackpad.buttonHeld = heldButtons.size > 0;
+}
+
+for (const b of $('pad-buttons').querySelectorAll('button')) {
+  b.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    lastActivity = Date.now();
+    if (!canInput()) return;
+    heldButtons.set(e.pointerId, b);
+    b.classList.add('down');
+    haptic();
+    send({ t: 'btn', b: Number(b.dataset.b), d: true });
+    trackpad.buttonHeld = true;
+  });
+  for (const name of ['pointerup', 'pointercancel', 'pointerleave']) {
+    b.addEventListener(name, (e) => releaseButton(e.pointerId));
+  }
+}
+
+$('pad-video').addEventListener('change', (e) => {
+  prefs.padVideo = e.target.checked;
+  savePrefs();
+  renderPad();
+  sendSettings();
 });
 
 // ---------------- 暂停：手动断开，或长时间不操作自动断开 ----------------
@@ -573,7 +646,7 @@ setInterval(() => {
 
 const modeHints = {
   touch: '和 Windows 平板一样：点按是单击，长按是右键，拖动、双指缩放和滚动由 Windows 识别。',
-  trackpad: '像笔记本触控板：单指移动光标，轻点单击，双指轻点右键，双指移动滚动，长按或点一下再按住可拖动，双指按住不动 0.5 秒后一根不动、另一根移动是右键拖动，三指轻点打开键盘。',
+  trackpad: '像笔记本触控板：单指移动光标，轻点单击，双指轻点右键，双指移动滚动，长按或点一下再按住可拖动，三指轻点打开键盘。下方的左键、右键可以按住，用另一根手指移动来拖动。',
 };
 
 function bindSeg(id, get, set) {
@@ -594,6 +667,7 @@ function renderMode() {
   renderSeg($('mode'), prefs.mode);
   $('mode-hint').textContent = modeHints[prefs.mode];
   $('trackpad-settings').hidden = prefs.mode !== 'trackpad';
+  renderPad();
 }
 
 bindSeg('mode', () => prefs.mode, (v) => {
@@ -601,6 +675,7 @@ bindSeg('mode', () => prefs.mode, (v) => {
   prefs.mode = v;
   savePrefs();
   renderMode();
+  sendSettings();
 });
 bindSeg('bitrate', () => prefs.bitrate, (v) => {
   prefs.bitrate = v === 'auto' ? 'auto' : Number(v);
@@ -863,7 +938,7 @@ const RDP_HINT = '这台电脑正在被远程桌面使用。远程桌面窗口�
 let blackSince = 0;
 setInterval(() => {
   const live = pc && pc.connectionState === 'connected' && !paused && !document.hidden;
-  const black = live && pcRemote && videoLooksBlack();
+  const black = live && pcRemote && videoWanted() && videoLooksBlack();
   blackSince = black ? (blackSince || Date.now()) : 0;
   if (black && Date.now() - blackSince >= 3000 && notice !== 'rdp') {
     notice = 'rdp';

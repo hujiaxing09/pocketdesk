@@ -41,6 +41,8 @@ public:
 	bool acceptAnswer(const std::string &id, const std::string &answerSdp);
 
 	bool hasViewers();
+	// 手机要不要画面（触控板模式可以只当触控板用，看电脑自己的屏幕）。没人要画面时不截屏不编码
+	void setVideoWanted(const std::string &id, bool wanted);
 	int viewerCount();
 	std::string deviceName(const std::string &id);
 	// 有新连接或手机请求关键帧（PLI）时为 true，读取后清零

@@ -45,6 +45,50 @@ button { font: inherit; color: inherit; }
   pointer-events: none;
 }
 
+/* 触控板模式：像笔记本那样的左右键，按下时变色并有轻微振动 */
+#pad-buttons {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  gap: 2px;
+  height: calc(72px + var(--safe-b));
+  padding: 0 var(--safe-r) var(--safe-b) var(--safe-l);
+  background: rgba(44, 44, 46, 0.6);
+  touch-action: none;
+}
+#pad-buttons[hidden], body.kb-open #pad-buttons { display: none; }
+#pad-buttons button {
+  flex: 1;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: rgba(58, 58, 60, 0.75);
+  color: var(--muted);
+  font-size: 13px;
+  transition: background-color 60ms, transform 60ms;
+  touch-action: none;
+}
+#pad-buttons button.down { background: rgba(10, 132, 255, 0.5); transform: scale(0.98); }
+#pad-hint {
+  position: fixed;
+  inset: 0 0 72px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 32px;
+  color: var(--muted);
+  font-size: 17px;
+  text-align: center;
+  pointer-events: none;
+}
+#pad-hint[hidden] { display: none; }
+#pad-hint small { font-size: 13px; }
+body.pad-only #screen { visibility: hidden; }
+.switch.pad-video { margin-top: 12px; }
+
 #status {
   position: fixed;
   left: 50%;

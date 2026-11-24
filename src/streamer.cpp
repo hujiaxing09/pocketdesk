@@ -42,6 +42,7 @@ struct Streamer::Session {
 	std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
 	std::atomic<bool> connected{false};
 	std::atomic<bool> dead{false};
+	bool wantsVideo = true;      // 在 mMutex 里读写
 	bool waitingKeyframe = true; // 新连接从 IDR 开始发，只在截屏线程里读写
 };
 
@@ -190,7 +191,7 @@ bool Streamer::acceptAnswer(const std::string &id, const std::string &answerSdp)
 bool Streamer::hasViewers() {
 	std::lock_guard lock(mMutex);
 	for (auto &[id, s] : mSessions)
-		if (!s->dead && s->track && s->track->isOpen())
+		if (!s->dead && s->wantsVideo && s->track && s->track->isOpen())
 			return true;
 	return false;
 }
@@ -199,7 +200,7 @@ void Streamer::sendVideo(const uint8_t *data, size_t size, bool keyframe) {
 	std::lock_guard lock(mMutex);
 	auto now = std::chrono::steady_clock::now();
 	for (auto &[id, s] : mSessions) {
-		if (s->dead || !s->track->isOpen())
+		if (s->dead || !s->wantsVideo || !s->track->isOpen())
 			continue;
 		if (s->waitingKeyframe) {
 			if (!keyframe) {
@@ -216,6 +217,20 @@ void Streamer::sendVideo(const uint8_t *data, size_t size, bool keyframe) {
 			log("[{}] 发送视频失败: {}", id, e.what());
 		}
 	}
+}
+
+void Streamer::setVideoWanted(const std::string &id, bool wanted) {
+	std::lock_guard lock(mMutex);
+	auto it = mSessions.find(id);
+	if (it == mSessions.end() || it->second->wantsVideo == wanted)
+		return;
+	it->second->wantsVideo = wanted;
+	if (wanted) {
+		// 重新要画面：从关键帧开始
+		it->second->waitingKeyframe = true;
+		mKeyRequest = true;
+	}
+	log("[{}] {}画面", id, wanted ? "恢复" : "不要");
 }
 
 int Streamer::closeDevice(const std::string &deviceId) {
