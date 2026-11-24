@@ -43,7 +43,7 @@ struct Streamer::Session {
 	std::atomic<bool> connected{false};
 	std::atomic<bool> dead{false};
 	bool wantsVideo = true;      // 在 mMutex 里读写
-	bool waitingKeyframe = true; // 新连接从 IDR 开始发，只在截屏线程里读写
+	bool waitingKeyframe = true; // 新连接、重新要画面时从 IDR 开始发；在 mMutex 里读写
 };
 
 Streamer::Streamer(Options options) : mOptions(options) { rtc::InitLogger(rtc::LogLevel::Warning); }
