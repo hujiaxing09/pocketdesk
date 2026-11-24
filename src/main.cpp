@@ -346,10 +346,10 @@ void captureLoop(const Args &args, Streamer &streamer, InputInjector &input, Set
 		}
 
 		if (!streamer.hasViewers()) {
-			if (encoder.isOpen()) {
-				log("没有手机在看，关闭编码器");
-				encoder.close();
-				converter.reset();
+			// 截屏设备和编码器一起释放（显卡内存一百多 MB），下次有人看时再打开
+			if (capture.device() || encoder.isOpen()) {
+				log("没有手机在看，关闭截屏和编码器");
+				closeAll();
 			}
 			Sleep(50);
 			continue;
