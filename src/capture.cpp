@@ -130,6 +130,12 @@ bool DesktopCapture::reopenDuplication() {
 	return true;
 }
 
+void DesktopCapture::release() {
+	mDup.Reset();
+	mFrame.Reset();
+	mPointer = PointerState{};
+}
+
 void DesktopCapture::close() {
 	mDup.Reset();
 	mFrame.Reset();

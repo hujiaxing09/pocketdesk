@@ -35,7 +35,7 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 std::atomic<bool> gRunning{true};
-constexpr const char *kVersion = "1.1.0";
+constexpr const char *kVersion = "1.1.1";
 std::filesystem::path gDataDir; // 证书、授权记录、日志都放这里，启动时确定
 
 enum class Mode {
@@ -67,6 +67,8 @@ struct Args {
 // 码率范围（kbps）
 constexpr int kAutoMinKbps = 3000;
 constexpr int kAutoMaxKbps = 20000;
+// 没人看多久之后连显卡设备也释放
+constexpr auto kReleaseDeviceAfter = std::chrono::minutes(10);
 
 // 手机可以改的设置；所有手机共用一份，后改的生效
 struct Settings {
@@ -327,6 +329,7 @@ void captureLoop(const Args &args, Streamer &streamer, InputInjector &input, Set
 	size_t encodedBytes = 0;
 	double encodeMsSum = 0, lagMsSum = 0;
 	auto lastSweep = Clock::now();
+	auto idleSince = Clock::now(); // 最后一部手机离开的时间
 
 	auto closeAll = [&] {
 		encoder.close();
@@ -346,9 +349,23 @@ void captureLoop(const Args &args, Streamer &streamer, InputInjector &input, Set
 		}
 
 		if (!streamer.hasViewers()) {
-			// 截屏设备和编码器一起释放（显卡内存一百多 MB），下次有人看时再打开
-			if (capture.device() || encoder.isOpen()) {
-				log("没有手机在看，关闭截屏和编码器");
+			// 没人看：马上释放编码器（显卡的编码会话数有限）、桌面复制和纹理，保留 D3D 设备，
+			// 手机锁屏再回来这类短暂断开时直接接着用。
+			// 空闲久了再连设备一起释放（NVIDIA 显卡上设备本身占一两百 MB）。不每次都重建设备，
+			// 是因为 NVIDIA 的 nvspcap64.dll 每建一次设备会留下两个句柄和一点内存
+			if (encoder.isOpen() || capture.hasDuplication()) {
+				idleSince = Clock::now();
+				log("没有手机在看，关闭编码器和桌面复制");
+				encoder.close();
+				converter.reset();
+				cursor.reset(); // 它缓存着画面纹理，清掉后在同一个设备上重新准备
+				cursor.init(capture.device(), capture.context());
+				cursorShapeVersion = 0;
+				composed.Reset();
+				capture.release();
+			}
+			if (capture.device() && Clock::now() - idleSince > kReleaseDeviceAfter) {
+				log("空闲超过 {} 分钟，释放显卡设备", kReleaseDeviceAfter.count());
 				closeAll();
 			}
 			Sleep(50);

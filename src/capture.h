@@ -42,6 +42,9 @@ public:
 	// outputIndex < 0 表示主显示器
 	bool open(int outputIndex);
 	void close();
+	// 没人看时释放桌面复制和画面纹理，保留 D3D 设备，下次 reopenDuplication 即可继续。
+	// 不反复重建设备：NVIDIA 的 nvspcap64.dll 每建一次设备就多占一个共享内存和互斥量句柄，不会释放
+	void release();
 	// 拿到新画面时把它复制到 frame()，presentQpc 是该画面的呈现时间（QPC）；
 	// 指针移动或换形状时 pointerChanged 为 true（画面本身可能没变）
 	Result acquire(UINT timeoutMs, int64_t &presentQpc, bool &pointerChanged);
