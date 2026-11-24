@@ -54,33 +54,47 @@ function unb64url(s) {
   return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
 }
 
-function encodeRing(ring) {
+export function encodeRing(ring) {
   if (!ring.token) return '';
   const pcs = Object.values(ring.pcs).map((p) => [p.id, p.name, p.addr || (p.addrs || [])[0] || '', p.https, p.alias || '']);
   return b64url(JSON.stringify([ring.group, ring.token, pcs]));
 }
 
 const addrsOf = (addr) => (addr ? [addr] : []);
+const aliasOf = (alias) => (alias ? { alias } : {});
 
-// 网址里带的钥匙串（主屏幕图标）。?ring= 是 1.0.0 的格式
-export function ringFromUrl(ring) {
-  const q = new URLSearchParams(location.search);
-  if (ring.token) return;
+// ?k= 的内容：{ group, token, pcs }；解不开返回 null
+export function decodeRing(text) {
   try {
-    const k = q.get('k');
-    if (k) {
-      const [group, token, pcs] = JSON.parse(unb64url(k));
-      Object.assign(ring, { group, token });
-      for (const [id, name, addr, https, alias] of pcs) upsert(ring, { id, name, addrs: addrsOf(addr), https, ...(alias ? { alias } : {}) });
-    }
-    const old = q.get('ring');
-    if (old) {
-      for (const [id, name, addr, https, token, alias] of JSON.parse(unb64url(old))) {
-        ring.legacy.push({ id, addrs: addrsOf(addr), https, token });
-        upsert(ring, { id, name, addrs: addrsOf(addr), https, ...(alias ? { alias } : {}) });
-      }
-    }
-  } catch { /* 网址被改坏了 */ }
+    const [group, token, pcs] = JSON.parse(unb64url(text));
+    return { group, token, pcs: pcs.map(([id, name, addr, https, alias]) => ({ id, name, addrs: addrsOf(addr), https, ...aliasOf(alias) })) };
+  } catch {
+    return null;
+  }
+}
+
+// 1.0.0 的 ?ring=：每台电脑各带一个令牌
+export function decodeLegacyRing(text) {
+  try {
+    return JSON.parse(unb64url(text)).map(([id, name, addr, https, token, alias]) => ({ id, name, addrs: addrsOf(addr), https, token, ...aliasOf(alias) }));
+  } catch {
+    return [];
+  }
+}
+
+// 网址里带的钥匙串（主屏幕图标）
+export function ringFromUrl(ring, search = location.search) {
+  if (ring.token) return;
+  const q = new URLSearchParams(search);
+  const k = decodeRing(q.get('k') || '');
+  if (k) {
+    Object.assign(ring, { group: k.group, token: k.token });
+    for (const p of k.pcs) upsert(ring, p);
+  }
+  for (const { token, ...pc } of decodeLegacyRing(q.get('ring') || '')) {
+    ring.legacy.push({ id: pc.id, addrs: pc.addrs, https: pc.https, token });
+    upsert(ring, pc);
+  }
 }
 
 // 手机编号：第一次打开时随机生成，授权时发给电脑，用来认出“这还是同一部手机”。

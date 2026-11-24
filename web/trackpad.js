@@ -3,6 +3,8 @@
 //   单指轻点：左键单击；连点两下：双击
 //   轻点后马上按住再移动，或者长按 0.5 秒后移动：按住左键拖动
 //   双指轻点：右键单击
+//   双指按住 0.5 秒不动，然后一根手指不动、另一根移动：右键拖动（像笔记本：一根手指按着右键，另一根拖），全部抬起松开。
+//     按住后两根一起动仍然是滚动（缩放也是两根一起动），按住后直接抬起是右键单击
 //   双指移动：滚轮（上下、左右，自然滚动方向）
 //   三指轻点：打开或收起键盘
 
@@ -30,34 +32,41 @@ export class Trackpad {
   }
 
   get active() { return this.pts.size > 0; }
-  get holding() { return Boolean(this.session && this.session.dragging); }
+  get holding() { return Boolean(this.session && this.session.button); }
 
   down(id, x, y) {
     const t = this.now();
     if (!this.pts.size) {
-      this.session = { start: t, max: 0, moved: false, dragging: false, fromDoubleTap: false, timer: undefined };
+      // button：正在按住拖动的键（0 = 没有）；armed：双指按住够久了，看第一下怎么动再决定是不是右键拖动
+      this.session = { start: t, max: 0, moved: false, button: 0, armed: false, timer: undefined };
       const last = this.lastTap;
       if (last && t - last.time < DOUBLE_TAP_MS && Math.hypot(x - last.x, y - last.y) < DOUBLE_TAP_SLOP) {
         // 轻点后马上又按下：按住左键，接下来移动就是拖动，直接抬起就构成双击
         this.lastTap = null;
-        this.session.dragging = true;
-        this.session.fromDoubleTap = true;
-        this.send({ t: 'btn', b: LEFT, d: true });
+        this.press(LEFT);
       } else {
-        const s = this.session;
-        s.timer = this.timers.setTimeout(() => {
-          s.timer = undefined;
-          if (this.session === s && this.pts.size === 1 && !s.moved && !s.dragging) {
-            s.dragging = true;
-            this.send({ t: 'btn', b: LEFT, d: true });
-          }
-        }, LONG_PRESS_MS);
+        this.holdAfter(1, () => this.press(LEFT));
       }
     }
     this.pts.set(id, { x, y, sx: x, sy: y });
     const s = this.session;
     s.max = Math.max(s.max, this.pts.size);
     if (this.pts.size > 1) this.clearTimer();
+    if (this.pts.size === 2 && !s.moved && !s.button) this.holdAfter(2, () => { s.armed = true; });
+  }
+
+  // fingers 根手指按住不动 LONG_PRESS_MS 后执行 action
+  holdAfter(fingers, action) {
+    const s = this.session;
+    s.timer = this.timers.setTimeout(() => {
+      s.timer = undefined;
+      if (this.session === s && this.pts.size === fingers && !s.moved && !s.button) action();
+    }, LONG_PRESS_MS);
+  }
+
+  press(button) {
+    this.session.button = button;
+    this.send({ t: 'btn', b: button, d: true });
   }
 
   move(id, x, y) {
@@ -68,12 +77,22 @@ export class Trackpad {
     const dy = y - p.y;
     p.x = x;
     p.y = y;
-    if (!s.moved && Math.hypot(x - p.sx, y - p.sy) > TAP_SLOP) {
+    const dist = Math.hypot(x - p.sx, y - p.sy);
+    if (!s.moved && dist > TAP_SLOP) {
       s.moved = true;
       this.clearTimer();
     }
+    // 双指按住后：等这根手指移动够 2 倍阈值再决定（两根一起动时另一根这时也早动了），决定前什么都不发。
+    // 另一根手指没动才是右键拖动；两根一起动（滚动、缩放）还是原来的手势
+    if (s.armed) {
+      if (dist <= TAP_SLOP * 2) return;
+      s.armed = false;
+      const othersStill = [...this.pts].every(([k, q]) => k === id || Math.hypot(q.x - q.sx, q.y - q.sy) <= TAP_SLOP);
+      if (othersStill) this.press(RIGHT);
+    }
     if (!s.moved) return;
-    if (this.pts.size === 1 && s.max === 1) {
+    // 右键拖动：哪根手指动就跟着哪根（按着不动的那根相当于右键）
+    if (s.button === RIGHT || (this.pts.size === 1 && s.max === 1)) {
       const g = this.gain();
       this.mx += dx * g;
       this.my += dy * g;
@@ -95,11 +114,15 @@ export class Trackpad {
     this.flush();
     const t = this.now();
     const duration = t - s.start;
-    if (s.dragging) {
-      this.send({ t: 'btn', b: LEFT, d: false });
+    if (s.button) {
+      this.send({ t: 'btn', b: s.button, d: false });
       return;
     }
     if (s.moved) return;
+    if (s.armed) {
+      this.click(RIGHT); // 双指按住后没动就抬起：右键单击
+      return;
+    }
     if (s.max === 1 && duration < TAP_MAX_MS) {
       this.click(LEFT);
       this.lastTap = { time: t, x, y };
@@ -116,7 +139,7 @@ export class Trackpad {
     this.session = null;
     this.clearTimer(s);
     this.mx = this.my = this.sx = this.sy = 0;
-    if (s && s.dragging) this.send({ t: 'btn', b: LEFT, d: false });
+    if (s && s.button) this.send({ t: 'btn', b: s.button, d: false });
   }
 
   // 每帧调用一次：把累计的移动和滚动发出去（只发整数部分，余数留到下一帧）
