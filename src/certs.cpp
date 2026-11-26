@@ -218,7 +218,7 @@ bool ensureCertificates(const std::filesystem::path &dir, const std::string &hos
 		if (!makeCa(caName, caKey, ca))
 			return false;
 		if (!writeKey(caKeyPath, caKey.get()) || !writeCert(caCertPath, ca.get())) {
-			log("根证书写入失败: {}", caCertPath.string());
+			log("根证书写入失败: {}", utf8(caCertPath));
 			return false;
 		}
 	}
@@ -230,7 +230,7 @@ bool ensureCertificates(const std::filesystem::path &dir, const std::string &hos
 		if (!makeLeaf(ca.get(), caKey.get(), dnsName, ips, leafKey, leaf))
 			return false;
 		if (!writeKey(out.serverKey, leafKey.get()) || !writeCert(out.serverCert, leaf.get())) {
-			log("服务器证书写入失败: {}", out.serverCert.string());
+			log("服务器证书写入失败: {}", utf8(out.serverCert));
 			return false;
 		}
 	}

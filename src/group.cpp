@@ -207,7 +207,7 @@ void Group::save() {
 	json j = mState;
 	j["local"] = mLocal;
 	if (!writeText(mFile, j.dump(1, '\t')))
-		log("保存组记录失败: {}", mFile.string());
+		log("保存组记录失败: {}", utf8(mFile));
 	mRev = sha256Hex(json{{"members", mState["members"]}, {"devices", mState["devices"]}}.dump(), 8);
 }
 

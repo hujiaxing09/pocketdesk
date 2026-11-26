@@ -183,16 +183,16 @@ bool WebServer::start(const Options &options, const CertFiles &certs, Streamer &
 	};
 
 	// ---- HTTPS ----
-	mHttps = std::make_unique<httplib::SSLServer>(certs.serverCert.string().c_str(),
-	                                              certs.serverKey.string().c_str());
+	mHttps = std::make_unique<httplib::SSLServer>(utf8(certs.serverCert).c_str(),
+	                                              utf8(certs.serverKey).c_str());
 	if (!mHttps->is_valid()) {
 		log("HTTPS 服务初始化失败（证书或私钥读取失败）");
 		return false;
 	}
 	auto &https = *mHttps;
 	https.set_post_routing_handler(noStore);
-	if (!https.set_mount_point("/", options.webDir.string())) {
-		log("网页目录不存在: {}", options.webDir.string());
+	if (!https.set_mount_point("/", utf8(options.webDir))) {
+		log("网页目录不存在: {}", utf8(options.webDir));
 		return false;
 	}
 	https.Get("/ca.crt", serveCa);
@@ -301,7 +301,7 @@ bool WebServer::start(const Options &options, const CertFiles &certs, Streamer &
 		res.status = body.is_object() && group.removeMember(body.value("id", "")) ? 204 : 404;
 	});
 	// 本机调试入口：浏览器把 http://127.0.0.1 当作安全页面，不装证书也能测整条链路（本机请求不需要授权）
-	http.set_mount_point("/app", options.webDir.string());
+	http.set_mount_point("/app", utf8(options.webDir));
 	http.Get("/api/info", getInfo);
 	http.Get("/api/group", getGroup);
 	http.Post("/api/session", createSession);

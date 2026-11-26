@@ -644,7 +644,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 		return service::uninstall(exePath());
 	const bool agent = args.mode == Mode::Agent;
 
-	log("PocketDesk {} 启动{}，数据目录 {}（{}）", kVersion, agent ? "（系统服务）" : "", dataDir().string(),
+	log("PocketDesk {} 启动{}，数据目录 {}（{}）", kVersion, agent ? "（系统服务）" : "", utf8(dataDir()),
 	    dataNote);
 	for (auto &o : listOutputs())
 		log("  显示器 {}{}: {} [{},{} {}x{}] 显卡 {} (0x{:04X})", o.index, o.primary ? "（主）" : "",
@@ -756,8 +756,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 			            MB_ICONERROR);
 		return 1;
 	}
-	log("证书目录: {}", (dataDir() / "certs").string());
-	log("日志目录: {}", logDir().string());
+	log("证书目录: {}", utf8(dataDir() / "certs"));
+	log("日志目录: {}", utf8(logDir()));
 	for (auto &ip : ips)
 		log("手机地址: https://{}:{}/（首次设置 http://{}:{}/）", ip, args.httpsPort, ip, args.httpPort);
 

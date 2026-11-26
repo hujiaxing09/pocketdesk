@@ -284,7 +284,7 @@ bool applyAcl(const std::filesystem::path &path, const wchar_t *sddl) {
 	                                  nullptr, nullptr, dacl, nullptr);
 	LocalFree(sd);
 	if (err != ERROR_SUCCESS)
-		log("设置 {} 的权限失败（错误 {}）", path.string(), err);
+		log("设置 {} 的权限失败（错误 {}）", utf8(path), err);
 	return err == ERROR_SUCCESS;
 }
 
@@ -376,7 +376,7 @@ int run(const std::filesystem::path &exe) {
 }
 
 int install(const std::filesystem::path &exe, const std::filesystem::path &dataDir) {
-	log("安装系统服务：{}", exe.string());
+	log("安装系统服务：{}", utf8(exe));
 	ScHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS));
 	if (!scm) {
 		log("打开服务管理器失败（错误 {}），需要管理员权限", GetLastError());

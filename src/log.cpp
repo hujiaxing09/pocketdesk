@@ -63,4 +63,9 @@ void logLine(const std::string &line) {
 
 std::string hexhr(long code) { return std::format("0x{:08X}", static_cast<unsigned long>(code)); }
 
+std::string utf8(const std::filesystem::path &p) {
+	auto s = p.u8string();
+	return std::string(s.begin(), s.end());
+}
+
 } // namespace pd
